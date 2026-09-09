@@ -14,7 +14,7 @@ def load_chat_model():
     Directly loads the specific model version recommended by the Google API 
     to bypass any deprecation or 404 errors.
     """
-    return genai.GenerativeModel('models/gemini-3.6-flash')
+    return genai.GenerativeModel("models/gemini-2.5-flash")
 
 # Initialize the cloud model
 chat_model = load_chat_model()
@@ -95,12 +95,12 @@ if st.button("Analyze Report"):
 
 if "current_report" in st.session_state:
     st.markdown("---")
-    st.markdown("### 💬 Triage Assistant")
+    st.markdown("###  Triage Assistant")
     
     # Quick action buttons for the LLM
     col1, col2 = st.columns(2)
     with col1:
-        if st.button("🔍 Analyze this report deeply"):
+        if st.button(" Analyze this report deeply"):
             st.session_state.messages.append({"role": "user", "content": "Analyze this report deeply and tell me what the core issue likely is."})
             with st.spinner("Analyzing..."):
                 reply = generate_ai_response("Analyze this report deeply and tell me what the core issue likely is.", st.session_state.current_report, st.session_state.prediction, stream=False)
@@ -108,7 +108,7 @@ if "current_report" in st.session_state:
                 st.rerun()
 
     with col2:
-        if st.button("📝 Rewrite professionally"):
+        if st.button(" Rewrite professionally"):
             st.session_state.messages.append({"role": "user", "content": "Rewrite this bug report so it is perfectly formatted for a developer."})
             with st.spinner("Rewriting..."):
                 reply = generate_ai_response("Rewrite this bug report so it is perfectly formatted for a developer with sections for Environment, Steps, Expected, and Actual results.", st.session_state.current_report, st.session_state.prediction, stream=False)
