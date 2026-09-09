@@ -14,7 +14,7 @@ def load_chat_model():
     Directly loads the specific model version recommended by the Google API 
     to bypass any deprecation or 404 errors.
     """
-    return genai.GenerativeModel("models/gemini-2.5-flash")
+    return genai.GenerativeModel("models/gemini-3.6-flash")
 
 # Initialize the cloud model
 chat_model = load_chat_model()
