@@ -1,0 +1,21 @@
+Report_Text|Label
+Environment: iOS 17, Safari mobile. Steps: 1. Open the application. 2. Tap on the profile icon. 3. Click the logout button. Expected Result: The user is redirected to the login screen and session cookies are cleared. Actual Result: The app freezes and throws a white screen of death.|Valid
+Bug in the checkout module during payment processing. Steps to reproduce: Add any item to the cart, proceed to checkout, enter valid credit card credentials, and click 'Pay Now'. Expected Result: Order confirmation page loads with a generated invoice number. Actual Result: An infinite loading spinner appears, and no transaction is recorded in the backend database.|Valid
+Dashboard metrics failing to load on Google Chrome. Steps: Log in as an admin user, navigate to the analytics dashboard, and select the date range 'Last 30 Days'. Expected Result: Visual charts render correctly with updated user metrics. Actual Result: The API route handler returns an HTTP 500 Internal Server Error.|Valid
+Profile picture upload error in user settings. Steps: Go to account settings, click 'Upload Avatar', select a valid PNG file under 2MB, and hit save. Expected Result: The image updates immediately on the UI. Actual Result: A generic error toast appears saying 'File upload failed' without an error code.|Valid
+The app is laggy when I click buttons.|Missing_Details
+Login doesn't work sometimes.|Missing_Details
+Page is broken please fix ASAP.|Missing_Details
+Error on the checkout screen when buying items.|Missing_Details
+The submit button is not clickable on mobile view.|Missing_Details
+Cannot assign healthcare worker to patient visit record. Windows 10, Chrome. Steps: 1. Log in. 2. Select patient ID. 3. Click assign. Expected: Dropdown appears. Actual: Page freezes.|Valid
+The patient visit page is completely broken. I tried to assign a healthcare worker to a new patient and the screen just froze.|Missing_Details
+When entering a new patient in the Barangay Maligaya portal, the save button does not work.|Missing_Details
+Mac OS, Safari. When clicking on the patient record for visit ID 1042, it loads forever. Expected: Record opens.|Missing_Details
+Windows 11, Edge. Steps: 1. Go to health worker assignment. 2. Click drop-down. 3. Select worker. Actual: Error 500.|Missing_Details
+Health center portal login fails. Windows 10, Firefox. Steps: 1. Go to login. 2. Enter admin credentials. 3. Hit enter. Expected: Dashboard loads. Actual: Returns to login screen.|Valid
+Patient ERD tables aren't updating when I add a new visit assignment.|Missing_Details
+Search bar throws an exception. Mac OS, Chrome. Steps: 1. Type patient name. 2. Click search. Expected: Patient list filters. Actual: UI crashes.|Valid
+Cannot generate the monthly patient summary report. Windows 11, Google Chrome. Steps to reproduce: 1. Navigate to Reports. 2. Click generate. Expected: PDF downloads. Actual: 504 Timeout error.|Valid
+Prescription data fails to save. Windows 10, Edge. Steps: 1. Open pharmacy tab. 2. Save record. Expected: Data commits. Actual: 404 error occurs.|Valid
+Patient profile search infinite load. Mac OS, Chrome. Steps: 1. Search ID 502. Expected: Profile loads. Actual: Infinite loading loop.|Valid
