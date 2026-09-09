@@ -5,8 +5,8 @@ import google.generativeai as genai
 # API and modeling 
 
 # Your Google API key
-API_KEY = "AIzaSyCsIHbbrxFq3eCWPlGhQxhahCCOqGZOz0Q" 
-genai.configure(api_key=API_KEY)
+# Safely pull the API key from Streamlit Cloud's secret manager
+genai.configure(api_key=st.secrets["GOOGLE_API_KEY"])
 
 @st.cache_resource
 def load_chat_model():
