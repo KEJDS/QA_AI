@@ -1,0 +1,4 @@
+streamlit
+joblib
+google-generativeai
+scikit-learn
