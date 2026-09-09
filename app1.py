@@ -20,7 +20,7 @@ def load_chat_model():
 chat_model = load_chat_model()
 
 # Load your local ML classification model for the initial validation gate
-model = joblib.load(r"C:\Users\HP\Documents\test\bug_model.pkl")
+model = joblib.load("bug_model.pkl")
 
 #help instructions
 
