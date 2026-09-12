@@ -1,4 +1,6 @@
 streamlit
-google-generativeai
 joblib
+google-generativeai
 scikit-learn
+PyPDF2
+python-docx
