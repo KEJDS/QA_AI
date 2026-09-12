@@ -91,7 +91,7 @@ st.set_page_config(page_title="BugTriage-NLP", layout="centered")
 
 # Sidebar for Multi-Format File Uploads
 with st.sidebar:
-    st.header("⚙️ QA Settings")
+    st.header(" QA Settings")
     st.write("Upload specific QA formatting guidelines for the AI to follow.")
     
     # Updated to accept multiple formats
