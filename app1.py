@@ -131,7 +131,8 @@ st.markdown("""
     <style>
         #MainMenu {visibility: hidden;}
         footer {visibility: hidden;}
-        header {visibility: hidden;}
+        /* We removed the hidden header line here so the sidebar toggle arrow comes back! */
+        
         .stButton>button {
             border-radius: 6px;
             font-weight: 500;
