@@ -125,7 +125,7 @@ def generate_ai_response(user_question, bug_report_context, prediction_status, g
 if "messages" not in st.session_state:
     st.session_state.messages = []
 
-st.set_page_config(page_title="BugTriage-NLP", layout="wide") 
+st.set_page_config(page_title="BugTriage-NLP", layout="wide", initial_sidebar_state="expanded") 
 
 st.markdown("""
     <style>
@@ -143,34 +143,38 @@ st.markdown("""
     </style>
 """, unsafe_allow_html=True)
 
-# Sidebar
+# --- SIDEBAR PANELS ---
 with st.sidebar:
-    st.header("System Configuration")
-    st.write("Upload specific QA formatting guidelines for the AI protocol.")
+    # Panel 1: File Uploads
+    st.header("Document Uploads")
+    st.write("Upload QA formatting guidelines (.txt, .pdf, .docx).")
     
-    uploaded_guideline = st.file_uploader("Upload Guidelines", type=["txt", "pdf", "docx"])
+    uploaded_guideline = st.file_uploader("Select File", type=["txt", "pdf", "docx"], label_visibility="collapsed")
     custom_guideline_text = ""
     if uploaded_guideline is not None:
         with st.spinner("Processing document..."):
             custom_guideline_text = extract_text_from_file(uploaded_guideline)
         if custom_guideline_text.strip():
-            st.success("Guidelines loaded successfully.")
-    
+            st.success("Guidelines active.")
+            
     st.divider()
     
-    # Audit Log Viewer for Defense Panel
-    st.header("Database Audit Logs")
-    with st.expander("View Chat History Database"):
-        records = get_all_history()
-        if records:
-            for row in records[:10]: # Show last 10 records
-                st.caption(f"Time: {row[3]} | Role: {row[1].upper()}")
-                st.write(f"{row[2][:100]}...") # Show snippet of content
-                st.divider()
-        else:
-            st.write("No database records found.")
+    # Panel 2: Database History
+    st.header("Chat History")
+    st.write("Database Audit Logs")
+    
+    records = get_all_history()
+    if records:
+        # Create a scrolling container if there are many records
+        with st.container(height=400):
+            for row in records[:15]: 
+                st.caption(f"{row[3]} | {row[1].upper()}")
+                st.write(f"{row[2][:80]}...") 
+                st.markdown("---")
+    else:
+        st.info("No database records found. Start a triage chat to generate logs.")
 
-# Main Application Header
+# --- MAIN APPLICATION ---
 st.title("BugTriage-NLP")
 st.markdown("**Automated Defect Report Validation and Triage Assistant**")
 st.divider()
@@ -224,24 +228,24 @@ if "current_report" in st.session_state:
         if st.button("Analyze Root Cause", use_container_width=True):
             msg = "Analyze this report deeply and identify the most probable root cause."
             st.session_state.messages.append({"role": "user", "content": msg})
-            save_message(st.session_state.session_id, "user", msg) # Save to DB
+            save_message(st.session_state.session_id, "user", msg)
             
             with st.spinner("Processing analysis..."):
                 reply = generate_ai_response(msg, st.session_state.current_report, st.session_state.prediction, guideline_text=custom_guideline_text, stream=False)
                 st.session_state.messages.append({"role": "assistant", "content": reply})
-                save_message(st.session_state.session_id, "assistant", reply) # Save to DB
+                save_message(st.session_state.session_id, "assistant", reply)
                 st.rerun()
 
     with ai_col2:
         if st.button("Standardize Report Format", use_container_width=True):
             msg = "Rewrite this bug report according to standard developer formatting."
             st.session_state.messages.append({"role": "user", "content": msg})
-            save_message(st.session_state.session_id, "user", msg) # Save to DB
+            save_message(st.session_state.session_id, "user", msg)
             
             with st.spinner("Restructuring..."):
                 reply = generate_ai_response(msg, st.session_state.current_report, st.session_state.prediction, guideline_text=custom_guideline_text, stream=False)
                 st.session_state.messages.append({"role": "assistant", "content": reply})
-                save_message(st.session_state.session_id, "assistant", reply) # Save to DB
+                save_message(st.session_state.session_id, "assistant", reply)
                 st.rerun()
 
     chat_container = st.container()
@@ -252,7 +256,7 @@ if "current_report" in st.session_state:
 
     if prompt_input := st.chat_input("Enter a query regarding this report..."):
         st.session_state.messages.append({"role": "user", "content": prompt_input})
-        save_message(st.session_state.session_id, "user", prompt_input) # Save to DB
+        save_message(st.session_state.session_id, "user", prompt_input)
         
         with st.chat_message("user"):
             st.markdown(prompt_input)
@@ -269,14 +273,13 @@ if "current_report" in st.session_state:
             if isinstance(response_stream, str):
                 st.markdown(response_stream)
                 st.session_state.messages.append({"role": "assistant", "content": response_stream})
-                save_message(st.session_state.session_id, "assistant", response_stream) # Save to DB
+                save_message(st.session_state.session_id, "assistant", response_stream)
             else:
                 def stream_text():
                     full_text = ""
                     for chunk in response_stream:
                         full_text += chunk.text
                         yield chunk.text
-                    # Save the fully compiled string to the database after streaming finishes
                     save_message(st.session_state.session_id, "assistant", full_text)
                 
                 full_reply = st.write_stream(stream_text)
