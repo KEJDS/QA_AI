@@ -5,7 +5,7 @@ import requests
 from datetime import datetime
 import io
 
-# --- NEW IMPORTS FOR FILE PARSING ---
+# --- IMPORTS FOR FILE PARSING ---
 import PyPDF2
 import docx
 
@@ -53,7 +53,7 @@ def export_to_external_system(bug_report, prediction):
 
 def generate_ai_response(user_question, bug_report_context, prediction_status, guideline_text="", stream=False):
     if not bug_report_context or bug_report_context.strip() == "":
-        return "I don't have a bug report to look at yet! Please analyze one first."
+        return "I do not have a bug report to look at yet. Please analyze one first."
         
     current_date = datetime.now().strftime('%Y-%m-%d')
     
@@ -87,37 +87,62 @@ def generate_ai_response(user_question, bug_report_context, prediction_status, g
 if "messages" not in st.session_state:
     st.session_state.messages = []
 
-st.set_page_config(page_title="BugTriage-NLP", layout="centered")
+# Modern, wide layout
+st.set_page_config(page_title="BugTriage-NLP", layout="wide") 
 
-# Sidebar for Multi-Format File Uploads
+# Custom CSS for a cleaner, modern app feel
+st.markdown("""
+    <style>
+        /* Hide the Streamlit header, menu, and footer */
+        #MainMenu {visibility: hidden;}
+        footer {visibility: hidden;}
+        header {visibility: hidden;}
+        
+        /* Modernize button styling */
+        .stButton>button {
+            border-radius: 6px;
+            font-weight: 500;
+            transition: all 0.2s ease;
+        }
+        .stButton>button:hover {
+            box-shadow: 0 4px 6px rgba(0,0,0,0.05);
+        }
+    </style>
+""", unsafe_allow_html=True)
+
+# Sidebar for Configuration
 with st.sidebar:
-    st.header(" QA Settings")
-    st.write("Upload specific QA formatting guidelines for the AI to follow.")
+    st.header("System Configuration")
+    st.write("Upload specific QA formatting guidelines for the AI protocol.")
     
-    # Updated to accept multiple formats
     uploaded_guideline = st.file_uploader("Upload Guidelines", type=["txt", "pdf", "docx"])
     
     custom_guideline_text = ""
     if uploaded_guideline is not None:
-        with st.spinner("Extracting text..."):
+        with st.spinner("Processing document..."):
             custom_guideline_text = extract_text_from_file(uploaded_guideline)
         if custom_guideline_text.strip():
-            st.success(f"{uploaded_guideline.name} loaded successfully!")
+            st.success("Guidelines loaded successfully.")
         else:
             st.warning("The file was uploaded, but no text could be extracted.")
 
+# Main Application Header
 st.title("BugTriage-NLP")
-st.subheader("Automated Defect Report Validation & Cloud AI Assistant")
-st.write("Drop your bug report below. The local ML model will validate it, and the cloud AI will help you refine it.")
+st.markdown("**Automated Defect Report Validation and Triage Assistant**")
+st.divider()
 
-user_input = st.text_area("Defect Description:", height=150, placeholder="Type or paste your bug report here...")
+# Input Section
+st.write("Input the defect description below. The local classification model will validate its structural integrity, followed by AI refinement.")
 
-btn_col1, btn_col2 = st.columns(2)
+user_input = st.text_area("Defect Description", height=150, placeholder="Enter bug report details here...", label_visibility="collapsed")
 
-with btn_col1:
-    if st.button("Analyze Report"):
+# Action Buttons Container
+action_col1, action_col2, action_col3 = st.columns([1, 1, 2])
+
+with action_col1:
+    if st.button("Analyze Report", use_container_width=True):
         if user_input.strip() == "":
-            st.warning("Please enter a defect description before analyzing.")
+            st.warning("Please enter a defect description before proceeding.")
         else:
             st.session_state.current_report = user_input
             st.session_state.messages = [] 
@@ -128,28 +153,39 @@ with btn_col1:
             
             if has_structure or prediction == "Valid":
                 st.session_state.prediction = "Valid"
-                st.success("Looks solid! This report has enough technical depth for triage.")
+                st.toast("Validation Complete: Report meets structural requirements.")
             else:
                 st.session_state.prediction = "Missing_Details"
-                st.error("This report is a bit thin on details. It's missing clear steps or expected outcomes.")
+                st.toast("Validation Complete: Report is missing critical details.")
 
-with btn_col2:
+with action_col2:
     if "current_report" in st.session_state:
-        if st.button("📤 Export to External System"):
-            with st.spinner("Connecting to API..."):
+        if st.button("Export to Tracking System", use_container_width=True):
+            with st.spinner("Connecting to external API..."):
                 success = export_to_external_system(st.session_state.current_report, st.session_state.prediction)
                 if success:
-                    st.success("Successfully pushed ticket to the external tracking system!")
+                    st.toast("Ticket successfully exported.")
 
+# Status Indicator Panel (Only show if analyzed)
 if "current_report" in st.session_state:
-    st.markdown("---")
-    st.markdown("### 💬 Triage Assistant")
+    st.divider()
     
-    col1, col2 = st.columns(2)
-    with col1:
-        if st.button("🔍 Analyze this report deeply"):
-            st.session_state.messages.append({"role": "user", "content": "Analyze this report deeply and tell me what the core issue likely is."})
-            with st.spinner("Analyzing..."):
+    status_col, empty_col = st.columns([1, 3])
+    with status_col:
+        st.caption("Current Validation Status")
+        if st.session_state.prediction == "Valid":
+            st.info("Status: Valid Structure")
+        else:
+            st.error("Status: Missing Details")
+
+    st.markdown("### Triage Assistant")
+    
+    # AI Quick Actions
+    ai_col1, ai_col2, ai_col3 = st.columns([1, 1, 2])
+    with ai_col1:
+        if st.button("Analyze Root Cause", use_container_width=True):
+            st.session_state.messages.append({"role": "user", "content": "Analyze this report deeply and identify the most probable root cause."})
+            with st.spinner("Processing analysis..."):
                 reply = generate_ai_response(
                     "Analyze this report deeply and tell me what the core issue likely is.", 
                     st.session_state.current_report, 
@@ -160,10 +196,10 @@ if "current_report" in st.session_state:
                 st.session_state.messages.append({"role": "assistant", "content": reply})
                 st.rerun()
 
-    with col2:
-        if st.button("📝 Rewrite professionally"):
-            st.session_state.messages.append({"role": "user", "content": "Rewrite this bug report so it is perfectly formatted for a developer."})
-            with st.spinner("Rewriting..."):
+    with ai_col2:
+        if st.button("Standardize Report Format", use_container_width=True):
+            st.session_state.messages.append({"role": "user", "content": "Rewrite this bug report according to standard developer formatting."})
+            with st.spinner("Restructuring..."):
                 reply = generate_ai_response(
                     "Rewrite this bug report so it is perfectly formatted for a developer.", 
                     st.session_state.current_report, 
@@ -174,11 +210,14 @@ if "current_report" in st.session_state:
                 st.session_state.messages.append({"role": "assistant", "content": reply})
                 st.rerun()
 
-    for message in st.session_state.messages:
-        with st.chat_message(message["role"]):
-            st.markdown(message["content"])
+    # Chat Interface Container
+    chat_container = st.container()
+    with chat_container:
+        for message in st.session_state.messages:
+            with st.chat_message(message["role"]):
+                st.markdown(message["content"])
 
-    if prompt_input := st.chat_input("Ask me anything about this report..."):
+    if prompt_input := st.chat_input("Enter a query regarding this report..."):
         st.session_state.messages.append({"role": "user", "content": prompt_input})
         with st.chat_message("user"):
             st.markdown(prompt_input)
