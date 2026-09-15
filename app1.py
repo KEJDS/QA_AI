@@ -11,11 +11,24 @@ import uuid
 import PyPDF2
 import docx
 
-# --- DATABASE SETUP ---
+# --- DATABASE SETUP & SESSION MANAGEMENT ---
 def init_db():
-    """Initializes the SQLite database and creates the history table."""
+    """Initializes the SQLite database with Sessions and ChatHistory tables."""
     conn = sqlite3.connect("chat_logs.db")
     cursor = conn.cursor()
+    
+    # Table for managing chat sessions
+    cursor.execute('''
+        CREATE TABLE IF NOT EXISTS Sessions (
+            session_id TEXT PRIMARY KEY,
+            title TEXT,
+            bug_report TEXT,
+            prediction TEXT,
+            timestamp DATETIME DEFAULT CURRENT_TIMESTAMP
+        )
+    ''')
+    
+    # Table for storing individual messages linked to a session
     cursor.execute('''
         CREATE TABLE IF NOT EXISTS ChatHistory (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -25,6 +38,21 @@ def init_db():
             timestamp DATETIME DEFAULT CURRENT_TIMESTAMP
         )
     ''')
+    conn.commit()
+    conn.close()
+
+def create_session(session_id, bug_report, prediction):
+    """Creates a new session record with an auto-generated title."""
+    # Generate a brief title from the first 35 characters of the bug report
+    clean_text = bug_report.replace('\n', ' ').strip()
+    title = clean_text[:35] + "..." if len(clean_text) > 35 else clean_text
+    
+    conn = sqlite3.connect("chat_logs.db")
+    cursor = conn.cursor()
+    cursor.execute(
+        "INSERT OR IGNORE INTO Sessions (session_id, title, bug_report, prediction) VALUES (?, ?, ?, ?)", 
+        (session_id, title, bug_report, prediction)
+    )
     conn.commit()
     conn.close()
 
@@ -39,19 +67,49 @@ def save_message(session_id, role, content):
     conn.commit()
     conn.close()
 
-def get_all_history():
-    """Retrieves all chat logs for the admin view."""
+def get_all_sessions():
+    """Retrieves all sessions for the sidebar history."""
     conn = sqlite3.connect("chat_logs.db")
     cursor = conn.cursor()
-    cursor.execute("SELECT session_id, role, content, timestamp FROM ChatHistory ORDER BY timestamp DESC")
+    cursor.execute("SELECT session_id, title, timestamp FROM Sessions ORDER BY timestamp DESC")
     records = cursor.fetchall()
     conn.close()
     return records
 
+def load_session(session_id):
+    """Loads a previous session's context and messages into the active state."""
+    conn = sqlite3.connect("chat_logs.db")
+    cursor = conn.cursor()
+    
+    # Fetch original bug report and prediction
+    cursor.execute("SELECT bug_report, prediction FROM Sessions WHERE session_id = ?", (session_id,))
+    session_data = cursor.fetchone()
+    
+    if session_data:
+        st.session_state.session_id = session_id
+        st.session_state.current_report = session_data[0]
+        st.session_state.prediction = session_data[1]
+        
+        # Fetch all messages for this session
+        cursor.execute("SELECT role, content FROM ChatHistory WHERE session_id = ? ORDER BY id ASC", (session_id,))
+        messages = cursor.fetchall()
+        st.session_state.messages = [{"role": row[0], "content": row[1]} for row in messages]
+        
+    conn.close()
+
+def start_new_chat():
+    """Resets the application state for a new bug report."""
+    st.session_state.session_id = str(uuid.uuid4())
+    st.session_state.messages = []
+    if "current_report" in st.session_state:
+        del st.session_state.current_report
+    if "prediction" in st.session_state:
+        del st.session_state.prediction
+
 # Initialize database on app startup
 init_db()
 
-# Session tracking for the database
+# Session tracking
 if "session_id" not in st.session_state:
     st.session_state.session_id = str(uuid.uuid4())
 
@@ -85,12 +143,6 @@ def extract_text_from_file(uploaded_file):
     return extracted_text
 
 def export_to_external_system(bug_report, prediction):
-    api_url = "https://api.your-external-system.com/v1/tickets"
-    payload = {
-        "title": f"New Defect - {prediction}",
-        "description": bug_report,
-        "priority": "High" if prediction == "Missing_Details" else "Normal"
-    }
     return True
 
 def generate_ai_response(user_question, bug_report_context, prediction_status, guideline_text="", stream=False):
@@ -131,8 +183,6 @@ st.markdown("""
     <style>
         #MainMenu {visibility: hidden;}
         footer {visibility: hidden;}
-        /* We removed the hidden header line here so the sidebar toggle arrow comes back! */
-        
         .stButton>button {
             border-radius: 6px;
             font-weight: 500;
@@ -141,15 +191,33 @@ st.markdown("""
         .stButton>button:hover {
             box-shadow: 0 4px 6px rgba(0,0,0,0.05);
         }
+        /* Style for the history buttons to look like clean links */
+        .history-btn>button {
+            text-align: left;
+            border: none;
+            background: none;
+            padding: 5px 0px;
+            color: #555;
+            font-size: 14px;
+        }
+        .history-btn>button:hover {
+            color: #000;
+            box-shadow: none;
+            text-decoration: underline;
+        }
     </style>
 """, unsafe_allow_html=True)
 
 # --- SIDEBAR PANELS ---
 with st.sidebar:
-    # Panel 1: File Uploads
+    if st.button("New Chat", use_container_width=True, type="primary"):
+        start_new_chat()
+        st.rerun()
+        
+    st.divider()
+    
     st.header("Document Uploads")
     st.write("Upload QA formatting guidelines (.txt, .pdf, .docx).")
-    
     uploaded_guideline = st.file_uploader("Select File", type=["txt", "pdf", "docx"], label_visibility="collapsed")
     custom_guideline_text = ""
     if uploaded_guideline is not None:
@@ -160,67 +228,70 @@ with st.sidebar:
             
     st.divider()
     
-    # Panel 2: Database History
     st.header("Chat History")
-    st.write("Database Audit Logs")
+    sessions = get_all_sessions()
     
-    records = get_all_history()
-    if records:
-        # Create a scrolling container if there are many records
+    if sessions:
         with st.container(height=400):
-            for row in records[:15]: 
-                st.caption(f"{row[3]} | {row[1].upper()}")
-                st.write(f"{row[2][:80]}...") 
-                st.markdown("---")
+            for sess_id, title, timestamp in sessions:
+                # Format date for cleaner display
+                date_str = timestamp.split(" ")[0] 
+                
+                # Clicking a history button loads that session
+                if st.button(f"{title} ({date_str})", key=sess_id, help="Click to resume this triage session"):
+                    load_session(sess_id)
+                    st.rerun()
     else:
-        st.info("No database records found. Start a triage chat to generate logs.")
+        st.info("No previous chats found.")
 
 # --- MAIN APPLICATION ---
 st.title("BugTriage-NLP")
 st.markdown("**Automated Defect Report Validation and Triage Assistant**")
 st.divider()
 
-st.write("Input the defect description below. The local classification model will validate its structural integrity, followed by AI refinement.")
-user_input = st.text_area("Defect Description", height=150, placeholder="Enter bug report details here...", label_visibility="collapsed")
+# Only show the input box if we are starting a fresh chat
+if "current_report" not in st.session_state:
+    st.write("Input the defect description below. The local classification model will validate its structural integrity, followed by AI refinement.")
+    user_input = st.text_area("Defect Description", height=150, placeholder="Enter bug report details here...", label_visibility="collapsed")
 
-action_col1, action_col2, action_col3 = st.columns([1, 1, 2])
+    action_col1, action_col2, action_col3 = st.columns([1, 1, 2])
 
-with action_col1:
-    if st.button("Analyze Report", use_container_width=True):
-        if user_input.strip() == "":
-            st.warning("Please enter a defect description before proceeding.")
-        else:
-            st.session_state.current_report = user_input
-            st.session_state.messages = [] 
-            
-            text_lower = user_input.lower()
-            has_structure = ("steps" in text_lower or "reproduce" in text_lower) and ("expected" in text_lower or "actual" in text_lower)
-            prediction = model.predict([user_input])[0]
-            
-            if has_structure or prediction == "Valid":
-                st.session_state.prediction = "Valid"
-                st.toast("Validation Complete: Report meets structural requirements.")
+    with action_col1:
+        if st.button("Analyze Report", use_container_width=True):
+            if user_input.strip() == "":
+                st.warning("Please enter a defect description before proceeding.")
             else:
-                st.session_state.prediction = "Missing_Details"
-                st.toast("Validation Complete: Report is missing critical details.")
-
-with action_col2:
-    if "current_report" in st.session_state:
-        if st.button("Export to Tracking System", use_container_width=True):
-            with st.spinner("Connecting to external API..."):
-                success = export_to_external_system(st.session_state.current_report, st.session_state.prediction)
-                if success:
-                    st.toast("Ticket successfully exported.")
-
-if "current_report" in st.session_state:
-    st.divider()
-    status_col, empty_col = st.columns([1, 3])
+                text_lower = user_input.lower()
+                has_structure = ("steps" in text_lower or "reproduce" in text_lower) and ("expected" in text_lower or "actual" in text_lower)
+                prediction = model.predict([user_input])[0]
+                
+                # Save state
+                st.session_state.current_report = user_input
+                st.session_state.prediction = "Valid" if (has_structure or prediction == "Valid") else "Missing_Details"
+                
+                # Log session in database
+                create_session(st.session_state.session_id, user_input, st.session_state.prediction)
+                st.rerun()
+else:
+    # Display the active report context if we are currently analyzing one
+    with st.expander("View Active Defect Report Context", expanded=False):
+        st.write(st.session_state.current_report)
+        
+    status_col, action_col, empty_col = st.columns([1, 1, 2])
     with status_col:
         st.caption("Current Validation Status")
         if st.session_state.prediction == "Valid":
             st.info("Status: Valid Structure")
         else:
             st.error("Status: Missing Details")
+            
+    with action_col:
+        st.caption("External Routing")
+        if st.button("Export to Tracking System", use_container_width=True):
+            with st.spinner("Connecting to external API..."):
+                success = export_to_external_system(st.session_state.current_report, st.session_state.prediction)
+                if success:
+                    st.toast("Ticket successfully exported.")
 
     st.markdown("### Triage Assistant")
     
