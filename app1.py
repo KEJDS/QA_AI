@@ -190,7 +190,38 @@ def extract_text_from_file(uploaded_file):
     return extracted_text
 
 def export_to_external_system(bug_report, prediction):
-    return True
+    """Exports the validated and restructured ticket to KEJDS/QA_Issues on GitHub."""
+    if "GITHUB_TOKEN" not in st.secrets:
+        st.error("Missing GITHUB_TOKEN in Streamlit secrets.")
+        return False, None
+
+    url = "https://api.github.com/repos/KEJDS/QA_Issues/issues"
+    headers = {
+        "Authorization": f"Bearer {st.secrets['GITHUB_TOKEN']}",
+        "Accept": "application/vnd.github+json"
+    }
+
+    # Grab the latest assistant message if the report was restructured/analyzed
+    assistant_msgs = [m["content"] for m in st.session_state.messages if m["role"] == "assistant"]
+    latest_ai_reply = assistant_msgs[-1] if assistant_msgs else "No AI restructuring performed yet."
+
+    # Create a concise issue title from the first line of the bug report
+    short_summary = bug_report.replace("\n", " ").strip()[:50]
+    issue_title = f"[{prediction}] {short_summary}..."
+
+    issue_body = f"""### Automated BugTriage-NLP Report
+**Validation Status:** `{prediction}` ({st.session_state.get('confidence', 'N/A')}%)
+
+---
+### AI Triage & Restructured Output
+{latest_ai_reply}
+
+---
+<details>
+<summary><b>View Original Raw Bug Report</b></summary>
+
+```text
+{bug_report}
 
 def generate_ai_response(user_question, bug_report_context, prediction_status, guideline_text="", stream=False):
     if not bug_report_context or bug_report_context.strip() == "":
