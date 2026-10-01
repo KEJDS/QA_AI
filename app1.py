@@ -1,7 +1,8 @@
+import os
 import streamlit as st
 import joblib
 import google.generativeai as genai
-import requests 
+import requests
 from datetime import datetime
 import io
 import sqlite3
@@ -11,10 +12,18 @@ import uuid
 import PyPDF2
 import docx
 
+# --- BASE DIRECTORY & FILE PATHS ---
+BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+DB_PATH = os.path.join(BASE_DIR, "chat_logs.db")
+
+# Points directly inside the "GitBugs" folder on GitHub (case-sensitive)
+VEC_PATH = os.path.join(BASE_DIR, "GitBugs", "tfidf_vectorizer.pkl")
+CLF_PATH = os.path.join(BASE_DIR, "GitBugs", "logistic_regression_validator.pkl")
+
 # --- DATABASE SETUP & SESSION MANAGEMENT ---
 def init_db():
     """Initializes the SQLite database with Sessions and ChatHistory tables."""
-    conn = sqlite3.connect("chat_logs.db")
+    conn = sqlite3.connect(DB_PATH)
     cursor = conn.cursor()
     
     # Table for managing chat sessions
@@ -43,11 +52,10 @@ def init_db():
 
 def create_session(session_id, bug_report, prediction):
     """Creates a new session record with an auto-generated title."""
-    # Generate a brief title from the first 35 characters of the bug report
     clean_text = bug_report.replace('\n', ' ').strip()
     title = clean_text[:35] + "..." if len(clean_text) > 35 else clean_text
     
-    conn = sqlite3.connect("chat_logs.db")
+    conn = sqlite3.connect(DB_PATH)
     cursor = conn.cursor()
     cursor.execute(
         "INSERT OR IGNORE INTO Sessions (session_id, title, bug_report, prediction) VALUES (?, ?, ?, ?)", 
@@ -58,7 +66,7 @@ def create_session(session_id, bug_report, prediction):
 
 def save_message(session_id, role, content):
     """Saves a single chat message to the database."""
-    conn = sqlite3.connect("chat_logs.db")
+    conn = sqlite3.connect(DB_PATH)
     cursor = conn.cursor()
     cursor.execute(
         "INSERT INTO ChatHistory (session_id, role, content) VALUES (?, ?, ?)", 
@@ -69,7 +77,7 @@ def save_message(session_id, role, content):
 
 def get_all_sessions():
     """Retrieves all sessions for the sidebar history."""
-    conn = sqlite3.connect("chat_logs.db")
+    conn = sqlite3.connect(DB_PATH)
     cursor = conn.cursor()
     cursor.execute("SELECT session_id, title, timestamp FROM Sessions ORDER BY timestamp DESC")
     records = cursor.fetchall()
@@ -78,10 +86,9 @@ def get_all_sessions():
 
 def load_session(session_id):
     """Loads a previous session's context and messages into the active state."""
-    conn = sqlite3.connect("chat_logs.db")
+    conn = sqlite3.connect(DB_PATH)
     cursor = conn.cursor()
     
-    # Fetch original bug report and prediction
     cursor.execute("SELECT bug_report, prediction FROM Sessions WHERE session_id = ?", (session_id,))
     session_data = cursor.fetchone()
     
@@ -90,7 +97,6 @@ def load_session(session_id):
         st.session_state.current_report = session_data[0]
         st.session_state.prediction = session_data[1]
         
-        # Fetch all messages for this session
         cursor.execute("SELECT role, content FROM ChatHistory WHERE session_id = ? ORDER BY id ASC", (session_id,))
         messages = cursor.fetchall()
         st.session_state.messages = [{"role": row[0], "content": row[1]} for row in messages]
@@ -101,10 +107,9 @@ def start_new_chat():
     """Resets the application state for a new bug report."""
     st.session_state.session_id = str(uuid.uuid4())
     st.session_state.messages = []
-    if "current_report" in st.session_state:
-        del st.session_state.current_report
-    if "prediction" in st.session_state:
-        del st.session_state.prediction
+    for key in ["current_report", "prediction", "confidence"]:
+        if key in st.session_state:
+            del st.session_state[key]
 
 # Initialize database on app startup
 init_db()
@@ -113,15 +118,22 @@ init_db()
 if "session_id" not in st.session_state:
     st.session_state.session_id = str(uuid.uuid4())
 
-# API and modeling 
+# --- API AND ML MODEL LOADING ---
 genai.configure(api_key=st.secrets["GOOGLE_API_KEY"])
 
 @st.cache_resource
 def load_chat_model():
     return genai.GenerativeModel('models/gemini-3.6-flash')
 
+@st.cache_resource
+def load_local_ml_pipeline():
+    """Loads the TF-IDF Vectorizer and Logistic Regression Classifier from the GitBugs folder."""
+    vectorizer = joblib.load(VEC_PATH)
+    validator = joblib.load(CLF_PATH)
+    return vectorizer, validator
+
 chat_model = load_chat_model()
-model = joblib.load("bug_model.pkl")
+vectorizer, validator = load_local_ml_pipeline()
 
 # --- TEXT EXTRACTION FUNCTION ---
 def extract_text_from_file(uploaded_file):
@@ -150,7 +162,7 @@ def generate_ai_response(user_question, bug_report_context, prediction_status, g
         return "I do not have a bug report to look at yet. Please analyze one first."
         
     current_date = datetime.now().strftime('%Y-%m-%d')
-    guideline_instructions = f"\nCRITICAL INSTRUCTION: Strictly evaluate the bug report against these specific company guidelines:\n{guideline_text}\n" if guideline_text else ""
+    guideline_instructions = f"\nCRITICAL INSTRUCTION: Strictly evaluate and format the bug report against these specific company guidelines:\n{guideline_text}\n" if guideline_text else ""
     
     prompt = f"""
     You are an expert Software Quality Assurance Engineer assisting a software developer.
@@ -159,12 +171,17 @@ def generate_ai_response(user_question, bug_report_context, prediction_status, g
     You are reviewing the following bug report:
     "{bug_report_context}"
     
-    The initial automated validation system flagged this report as: {prediction_status}.
+    The initial local Scikit-Learn Logistic Regression validation system flagged this report as: {prediction_status}.
     
     The user is asking you this question: "{user_question}"
     
     Answer the user's question directly, conversationally, and practically. 
-    Analyze the report to suggest potential root causes based strictly on the context provided.
+    When restructuring or analyzing the report, ensure you provide:
+    1. Standardized Title & Summary
+    2. Identified Severity Level (Blocker, Critical, Major, Minor, or Trivial)
+    3. Recommended Developer Routing / Component Assignment (e.g., Backend/Core, SQL/Database, UI/Frontend, API, or Network)
+    4. Structured Steps to Reproduce, Expected Result, and Actual Result (or list exact clarification questions if details are missing)
+    5. Probable Root-Cause Analysis based strictly on the context provided.
     If they ask an unrelated question, answer it briefly if you have the context, but gently steer them back to discussing the bug report.
     """
     try:
@@ -234,7 +251,6 @@ with st.sidebar:
     if sessions:
         with st.container(height=400):
             for sess_id, title, timestamp in sessions:
-                # Format date for cleaner display
                 date_str = timestamp.split(" ")[0] 
                 
                 # Clicking a history button loads that session
@@ -261,16 +277,32 @@ if "current_report" not in st.session_state:
             if user_input.strip() == "":
                 st.warning("Please enter a defect description before proceeding.")
             else:
-                text_lower = user_input.lower()
+                clean_input = user_input.strip()
+                text_lower = clean_input.lower()
+                word_count = len(clean_input.split())
+                
+                # Phase 1: TF-IDF Vectorization + Logistic Regression Validation
+                features = vectorizer.transform([clean_input])
+                ml_prediction = validator.predict(features)[0]
+                confidence = max(validator.predict_proba(features)[0]) * 100
+                
+                # Structural keyword check + minimum length gatekeeper
                 has_structure = ("steps" in text_lower or "reproduce" in text_lower) and ("expected" in text_lower or "actual" in text_lower)
-                prediction = model.predict([user_input])[0]
+                
+                if word_count < 15:
+                    final_prediction = "Missing_Details"
+                elif has_structure or ml_prediction == "Valid":
+                    final_prediction = "Valid"
+                else:
+                    final_prediction = "Missing_Details"
                 
                 # Save state
-                st.session_state.current_report = user_input
-                st.session_state.prediction = "Valid" if (has_structure or prediction == "Valid") else "Missing_Details"
+                st.session_state.current_report = clean_input
+                st.session_state.prediction = final_prediction
+                st.session_state.confidence = round(confidence, 2)
                 
                 # Log session in database
-                create_session(st.session_state.session_id, user_input, st.session_state.prediction)
+                create_session(st.session_state.session_id, clean_input, st.session_state.prediction)
                 st.rerun()
 else:
     # Display the active report context if we are currently analyzing one
@@ -280,10 +312,11 @@ else:
     status_col, action_col, empty_col = st.columns([1, 1, 2])
     with status_col:
         st.caption("Current Validation Status")
+        conf_str = f" ({st.session_state.confidence}%)" if "confidence" in st.session_state else ""
         if st.session_state.prediction == "Valid":
-            st.info("Status: Valid Structure")
+            st.info(f"Status: Valid Structure{conf_str}")
         else:
-            st.error("Status: Missing Details")
+            st.error(f"Status: Missing Details{conf_str}")
             
     with action_col:
         st.caption("External Routing")
@@ -298,7 +331,7 @@ else:
     ai_col1, ai_col2, ai_col3 = st.columns([1, 1, 2])
     with ai_col1:
         if st.button("Analyze Root Cause", use_container_width=True):
-            msg = "Analyze this report deeply and identify the most probable root cause."
+            msg = "Analyze this report deeply, recommend the target developer team/component for routing, and identify the most probable root cause."
             st.session_state.messages.append({"role": "user", "content": msg})
             save_message(st.session_state.session_id, "user", msg)
             
@@ -310,7 +343,7 @@ else:
 
     with ai_col2:
         if st.button("Standardize Report Format", use_container_width=True):
-            msg = "Rewrite this bug report according to standard developer formatting."
+            msg = "Rewrite this bug report according to standard developer formatting, including Severity Level, Target Developer Routing, Steps to Reproduce, Expected vs. Actual Results, and Root-Cause Analysis."
             st.session_state.messages.append({"role": "user", "content": msg})
             save_message(st.session_state.session_id, "user", msg)
             
