@@ -1,0 +1,472 @@
+Summary,Issue id,Status,Priority,Resolution,Created,Resolved,Affects Version/s,Description
+Migration to NumPy documentation style in MLlib (pyspark.mllib.*),13337325,Resolved,Major,Fixed,27/Oct/20 03:07,25/Nov/20 01:25,3.1.0, This JIRA targets to migrate to NumPy documentation style in MLlib (pyspark.mllib.*). Please also see the parent JIRA.
+Track whether the worker is also being decommissioned along with an executor,13315515,Resolved,Major,Fixed,08/Jul/20 00:50,23/Jul/20 04:06,3.1.0,"When an executor is decommissioned, we would like to know if its shuffle data is truly going to be lost. In the case of external shuffle service, this means knowing that the worker (or the node that the executor is on) is also going to be lost. 
+
+ 
+
+( I don't think we need to worry about disaggregated remote shuffle storage at present since those are only used in a couple of web companies – but when there is remote shuffle then yes the shuffle won't be lost with a decommissioned executor )
+
+ 
+
+We know for sure that a worker is being decommissioned when the Master is asked to decommission a worker. In case of other schedulers:
+ * Yarn support for decommissioning isn't implemented yet. But the idea would be for Yarn preeemption to not mark that the worker is being lost, but machine level decommissioning (like for kernel upgrades) to do mark such.
+ * K8s isn't quite working with external shuffle service as yet, so when the executor is lost, the worker isn't quite lost with it. 
+
+ "
+Refine Python data source API docstring and type hints,13582952,Resolved,Major,Fixed,17/Jun/24 21:07,19/Jun/24 00:07,4.0.0,Improve the type hints and docstrings for datasource.py
+Improve DeduplicateRelations rewriteAttrs compatibility,13546773,Open,Major,,10/Aug/23 06:51,,3.5.0,"{{Follow [https://github.com/apache/spark/pull/41554,] we should add test for }}
+
+{{{}MapPartitionsInR{}}}, {{{}MapPartitionsInRWithArrow{}}}, {{{}MapElements{}}}, {{{}MapGroups{}}}, {{{}FlatMapGroupsWithState{}}}, {{{}FlatMapGroupsInR{}}}, {{{}FlatMapGroupsInR{}}}, {{{}FlatMapGroupsInRWithArrow{}}}, {{{}FlatMapGroupsInPandas{}}}, {{{}MapInPandas{}}}, {{{}PythonMapInArrow{}}}, {{FlatMapGroupsInPandasWithState and}} {{FlatMapCoGroupsInPandas}}
+
+{{To make sure DeduplicateRelations rewriteAttrs will rewrite its attribute normally. Also should fix the error behavior follow [https://github.com/apache/spark/pull/41554|https://github.com/apache/spark/pull/41554,]}}"
+Overflow/round errors in conversions of milliseconds to/from microseconds,13287042,Resolved,Major,Fixed,23/Feb/20 09:04,24/Feb/20 06:20,3.0.0,"Spark has special methods in DataTimeUtils for converting microseconds from/to milliseconds - `fromMillis` and `toMillis()`. The methods handle arithmetic overflow and round negative values. The ticket aims to review all places in Spark SQL where microseconds are converted from/to milliseconds, and replace them by util methods from DateTimeUtils."
+Spark Web UI ,13498873,Resolved,Minor,Invalid,07/Nov/22 19:47,08/Nov/22 02:49,3.2.1,"Hi everyone,
+
+I have the following setup. 
+ * Spark 3.2.1 created from bitnami images
+ * Forwarded port 8080 to 12345 in Docker container with spark master: 0.0.0.0:12345->8080/tcp 
+
+In spark-config:
+ * spark.ui.reverseProxy=true
+ * spark.ui.reverseProxyUrl=[https://host.com/project/spark/]
+
+ 
+
+Apache 2.4.6 (same host):
+
+ 
+{code:java}
+ RewriteCond %{HTTP:Connection} Upgrade [NC]
+          RewriteCond %{HTTP:Upgrade} websocket [NC]
+          RewriteRule /project/spark/(.*) ws://host.com:12345/$1 [NE,P,L]          ProxyPass /project/spark/ http://host.com:10721/
+          ProxyPassReverse /project/spark/ http://host.com:12345/
+ {code}
+ 
+
+ 
+
+ 
+
+When I access [http://host.com/project/spark/] master ui seems working fine. However If I click on application UI  (running app)
+
+!spark.png!
+
+ 
+
+Url is resolved in such a way:
+
+[https://host.com/project/spark/proxy/app-20221107152648-0484]
+
+And I've got timeout every single time
+
+ 
+
+However similar URLs like
+
+[https://host.com/project/spark/proxy/worker-20221025101018-xxx|https://datahack.corpnet.pl/cvm/spark/proxy/worker-20221025101018-172.26.0.15-45263]
+
+works fine.
+
+ 
+
+What can I change to get application detail UI?
+
+ 
+
+Thanks for feedback,
+
+ 
+
+Pawel ""Paul"" Granat
+
+ 
+
+ 
+
+ "
+Fix doc link of datetime pattern in 3.0 migration guide,13318198,Resolved,Major,Fixed,20/Jul/20 08:30,20/Jul/20 11:50,3.0.1,"In http://spark.apache.org/docs/latest/sql-migration-guide.html#query-engine, there is a invalid reference for datetime reference ""sql-ref-datetime-pattern.md"". We should fix it."
+Add a documentation page for ANSI mode,13282807,Resolved,Major,Fixed,02/Feb/20 02:18,13/Feb/20 18:55,3.0.0,ANSI mode is introduced in Spark 3.0. We need to clearly document the behavior difference when spark.sql.ansi.enabled is on and off. 
+Show test report in GitHub Actions builds from PRs,13422236,Resolved,Major,Fixed,12/Jan/22 12:51,13/Jan/22 23:43,3.3.0,"Currently, the test report like https://github.com/apache/spark/runs/4788468586 is not directly shown in workflow runs in the link provided in PRs, e.g.) https://github.com/yaooqinn/spark/actions/runs/1687326379
+
+We should make the test report visible."
+[SQL][JDBC] Improve the rename interface of Postgres Dialect,13553240,Open,Minor,,07/Oct/23 11:00,,3.5.0,Improve the rename interface of pgdialect
+Support string type in Z-order expression,13412399,Open,Minor,,18/Nov/21 02:10,,3.3.0,This Jira is to support string type in Z-order expression.
+Column.isNull returns nan instead of None,13516149,Resolved,Major,Fixed,02/Jan/23 08:25,04/Jan/23 23:52,3.4.0,"{code}
+File ""/.../spark/python/pyspark/sql/connect/column.py"", line 99, in pyspark.sql.connect.column.Column.isNull
+Failed example:
+    df.filter(df.height.isNull()).collect()
+Expected:
+    [Row(name='Alice', height=None)]
+Got:
+    [Row(name='Alice', height=nan)]
+{code}"
+Switching inner join statement yield different result,13291545,Resolved,Major,Won't Fix,13/Mar/20 12:32,17/Mar/20 01:46,2.4.4,"Given this query
+
+ 
+{code:java}
+select r.id
+from sqoop_wongnai.wongnai__w_ref r
+inner join sqoop_wongnai.wongnai__w_photo p on p.root_referrer_id = r.id
+inner join tests.restaurants_id_export_photos i on i.restaurant_id = r.restaurant_id
+where r.restaurant_id = 360
+{code}
+Spark return nothing except when I switch inner join statement between line 3 and 4 there are results returned.
+
+I guarantee that we have data that match the join condition above.
+
+Here's result from explain extend of above query:
+
+ 
+{code:java}
+== Parsed Logical Plan ==
+'Project ['r.id]
++- 'Filter ('r.restaurant_id = 360)
+   +- 'Join Inner, ('i.restaurant_id = 'r.restaurant_id)
+      :- 'Join Inner, ('p.root_referrer_id = 'r.id)
+      :  :- 'SubqueryAlias `r`
+      :  :  +- 'UnresolvedRelation `sqoop_wongnai`.`wongnai__w_ref`
+      :  +- 'SubqueryAlias `p`
+      :     +- 'UnresolvedRelation `sqoop_wongnai`.`wongnai__w_photo`
+      +- 'SubqueryAlias `i`
+         +- 'UnresolvedRelation `tests`.`restaurants_id_export_photos`
+
+== Analyzed Logical Plan ==
+id: bigint
+Project [id#1834834L]
++- Filter (restaurant_id#1834836L = cast(360 as bigint))
+   +- Join Inner, (restaurant_id#1834876L = restaurant_id#1834836L)
+      :- Join Inner, (root_referrer_id#1834858L = id#1834834L)
+      :  :- SubqueryAlias `r`
+      :  :  +- SubqueryAlias `sqoop_wongnai`.`wongnai__w_ref`
+      :  :     +- HiveTableRelation `sqoop_wongnai`.`wongnai__w_ref`, org.apache.hadoop.hive.serde2.avro.AvroSerDe, [id#1834834L, restaurant_id#1834836L,]
+      :  +- SubqueryAlias `p`
+      :     +- SubqueryAlias `sqoop_wongnai`.`wongnai__w_photo`
+      :        +- HiveTableRelation `sqoop_wongnai`.`wongnai__w_photo`, org.apache.hadoop.hive.serde2.avro.AvroSerDe, [root_referrer_id#1834858L, ... 14 more fields]
+      +- SubqueryAlias `i`
+         +- SubqueryAlias `tests`.`restaurants_id_export_photos`
+            +- HiveTableRelation `tests`.`restaurants_id_export_photos`, org.apache.hadoop.hive.serde2.lazy.LazySimpleSerDe, [restaurant_id#1834876L]== Optimized Logical Plan ==
+Project [id#1834834L]
++- Join Inner, (restaurant_id#1834876L = restaurant_id#1834836L)
+   :- Project [id#1834834L, restaurant_id#1834836L]
+   :  +- Join Inner, (root_referrer_id#1834858L = id#1834834L)
+   :     :- Project [id#1834834L, restaurant_id#1834836L]
+   :     :  +- Filter ((isnotnull(restaurant_id#1834836L) && (restaurant_id#1834836L = 360)) && isnotnull(id#1834834L))
+   :     :     +- InMemoryRelation [id#1834834L, restaurant_id#1834836L], StorageLevel(disk, memory, deserialized, 1 replicas)
+   :     :           +- Scan hive sqoop_wongnai.wongnai__w_ref [id#87357L, restaurant_id#87359L], HiveTableRelation `sqoop_wongnai`.`wongnai__w_ref`, org.apache.hadoop.hive.serde2.avro.AvroSerDe, [id#87357L, restaurant_id#87359L]
+   :     +- Project [root_referrer_id#1834858L]
+   :        +- Filter (isnotnull(root_referrer_id#1834858L) && bloomfilter#1835088 of [id#1834834L] filtering [root_referrer_id#1834858L])
+   :           +- InMemoryRelation [root_referrer_id#1834858L], StorageLevel(disk, memory, deserialized, 1 replicas)
+   :                 +- Scan hive sqoop_wongnai.wongnai__w_photo [root_referrer_id#82906L], HiveTableRelation `sqoop_wongnai`.`wongnai__w_photo`, org.apache.hadoop.hive.serde2.avro.AvroSerDe, [root_referrer_id#82906L]
+   +- Filter ((isnotnull(restaurant_id#1834876L) && (restaurant_id#1834876L = 360)) && bloomfilter#1835087 of [restaurant_id#1834836L] filtering [restaurant_id#1834876L])
+      +- HiveTableRelation `tests`.`restaurants_id_export_photos`, org.apache.hadoop.hive.serde2.lazy.LazySimpleSerDe, [restaurant_id#1834876L]
+
+== Physical Plan ==
+*(7) Project [id#1834834L]
++- *(7) SortMergeJoin [restaurant_id#1834836L], [restaurant_id#1834876L], Inner
+   :- *(5) Sort [restaurant_id#1834836L ASC NULLS FIRST], false, 0
+   :  +- Exchange hashpartitioning(restaurant_id#1834836L, 200)
+   :     +- *(4) Project [id#1834834L, restaurant_id#1834836L]
+   :        +- *(4) SortMergeJoin [id#1834834L], [root_referrer_id#1834858L], Inner
+   :           :- *(2) Sort [id#1834834L ASC NULLS FIRST], false, 0
+   :           :  +- Exchange hashpartitioning(id#1834834L, 200)
+   :           :     +- *(1) Filter ((isnotnull(restaurant_id#1834836L) && (restaurant_id#1834836L = 360)) && isnotnull(id#1834834L))
+   :           :        +- *(1) InMemoryTableScan [id#1834834L, restaurant_id#1834836L], [isnotnull(restaurant_id#1834836L), (restaurant_id#1834836L = 360), isnotnull(id#1834834L)]
+   :           :              +- InMemoryRelation [id#1834834L, restaurant_id#1834836L], StorageLevel(disk, memory, deserialized, 1 replicas)
+   :           :                    +- Scan hive sqoop_wongnai.wongnai__w_ref [id#87357L, restaurant_id#87359L], HiveTableRelation `sqoop_wongnai`.`wongnai__w_ref`, org.apache.hadoop.hive.serde2.avro.AvroSerDe, [id#87357L, restaurant_id#87359L]
+   :           +- *(3) Sort [root_referrer_id#1834858L ASC NULLS FIRST], false, 0
+   :              +- Exchange hashpartitioning(root_referrer_id#1834858L, 200)
+   :                 +- Filter (isnotnull(root_referrer_id#1834858L) && bloomfilter#1835088 of [bf1835088 id#1834834L estimatedNumRows=1457534] filtering [root_referrer_id#1834858L])
+   :                    :  +- GenerateBloomFilter
+   :                    :     +- ReusedExchange [id#1834834L, restaurant_id#1834836L], Exchange hashpartitioning(id#1834834L, 200)
+   :                    +- InMemoryTableScan [root_referrer_id#1834858L], [isnotnull(root_referrer_id#1834858L), bloomfilter#1835088 of [bf1835088 id#1834834L estimatedNumRows=1457534] filtering [root_referrer_id#1834858L]]
+   :                          :- InMemoryRelation [root_referrer_id#1834858L], StorageLevel(disk, memory, deserialized, 1 replicas)
+   :                          :     +- Scan hive sqoop_wongnai.wongnai__w_photo [root_referrer_id#82906L], HiveTableRelation `sqoop_wongnai`.`wongnai__w_photo`, org.apache.hadoop.hive.serde2.avro.AvroSerDe, [root_referrer_id#82906L]
+   :                          +- GenerateBloomFilter
+   :                             +- ReusedExchange [id#1834834L, restaurant_id#1834836L], Exchange hashpartitioning(id#1834834L, 200)
+   +- *(6) Sort [restaurant_id#1834876L ASC NULLS FIRST], false, 0
+      +- Exchange hashpartitioning(restaurant_id#1834876L, 200)
+         +- Filter ((isnotnull(restaurant_id#1834876L) && (restaurant_id#1834876L = 360)) && bloomfilter#1835087 of [bf1835088 id#1834834L estimatedNumRows=1457534] filtering [restaurant_id#1834876L])
+            :  +- GenerateBloomFilter
+            :     +- ReusedExchange [id#1834834L, restaurant_id#1834836L], Exchange hashpartitioning(id#1834834L, 200)
+            +- Scan hive tests.restaurants_id_export_photos [restaurant_id#1834876L], HiveTableRelation `tests`.`restaurants_id_export_photos`, org.apache.hadoop.hive.serde2.lazy.LazySimpleSerDe, [restaurant_id#1834876L]
+{code}
+ 
+
+ 
+
+ 
+
+I noticed that in physical plan
+
+ 
+{code:java}
+bloomfilter#1835087 of [bf1835088 id#1834834L estimatedNumRows=1457534] filtering [restaurant_id#1834876L]
+{code}
+it use bf1835088 id#1834834L for filtering restaurant_id#1834876L and which is different from join condition.
+
+I think that the correct Physical query plan should use bf1835087 restaurant_id#1834836L for filtering restaurant_id#1834876L.
+
+ 
+
+You can see full of query plan of both incorrect and correct in this link:
+
+[https://gist.github.com/tanapoln/67a335858dede5eddd9d80659de60d72]
+
+ 
+
+I don't know why switching inner join statement yield the different result.
+
+I don't know it is a bug or I misunderstand join in Spark. 
+
+Please help.
+
+ "
+Fix HiveCompatibilitySuite under ANSI mode,13428699,Resolved,Major,Fixed,16/Feb/22 05:10,16/Feb/22 08:51,3.3.0,Fix sql/hive/compatibility/src/test/scala/org/apache/spark/sql/hive/execution/HiveCompatibilitySuite.scala under ANSI mode.
+Support optimize skewed partitions in Distribution and Ordering if numPartitions is not specified,13415117,Resolved,Major,Fixed,02/Dec/21 19:36,30/May/22 06:39,3.2.1,"When doing repartition in distribution and sort, if data source requests for a specific number of partitions, we should not optimize repartition. However, if data source does not request for a specific number of partitions, Spark should optimize repartition and split the skewed partitions if necessary."
+Failed to push down filters through Expand,13338076,Resolved,Major,Fixed,30/Oct/20 12:46,10/Nov/20 14:41,2.3.4,"How to reproduce this issue:
+
+{code:sql}
+create table SPARK_33302_1(pid int, uid int, sid int, dt date, suid int) using parquet;
+create table SPARK_33302_2(pid int, vs int, uid int, csid int) using parquet;
+
+SELECT
+       years,
+       appversion,                                               
+       SUM(uusers) AS users                                      
+FROM   (SELECT
+               Date_trunc('year', dt)          AS years,
+               CASE                                              
+                 WHEN h.pid = 3 THEN 'iOS'           
+                 WHEN h.pid = 4 THEN 'Android'       
+                 ELSE 'Other'                                    
+               END                             AS viewport,      
+               h.vs                            AS appversion,
+               Count(DISTINCT u.uid)           AS uusers
+               ,Count(DISTINCT u.suid)         AS srcusers
+        FROM   SPARK_33302_1 u                                   
+               join SPARK_33302_2 h                              
+                 ON h.uid = u.uid            
+        GROUP  BY 1,                                             
+                  2,                                             
+                  3) AS a
+WHERE  viewport = 'iOS'                                          
+GROUP  BY 1,                                                     
+          2
+{code}
+
+
+{noformat}
+== Physical Plan ==
+*(5) HashAggregate(keys=[years#30, appversion#32], functions=[sum(uusers#33L)])
++- Exchange hashpartitioning(years#30, appversion#32, 200), true, [id=#251]
+   +- *(4) HashAggregate(keys=[years#30, appversion#32], functions=[partial_sum(uusers#33L)])
+      +- *(4) HashAggregate(keys=[date_trunc('year', CAST(u.`dt` AS TIMESTAMP))#45, CASE WHEN (h.`pid` = 3) THEN 'iOS' WHEN (h.`pid` = 4) THEN 'Android' ELSE 'Other' END#46, vs#12], functions=[count(if ((gid#44 = 1)) u.`uid`#47 else null)])
+         +- Exchange hashpartitioning(date_trunc('year', CAST(u.`dt` AS TIMESTAMP))#45, CASE WHEN (h.`pid` = 3) THEN 'iOS' WHEN (h.`pid` = 4) THEN 'Android' ELSE 'Other' END#46, vs#12, 200), true, [id=#246]
+            +- *(3) HashAggregate(keys=[date_trunc('year', CAST(u.`dt` AS TIMESTAMP))#45, CASE WHEN (h.`pid` = 3) THEN 'iOS' WHEN (h.`pid` = 4) THEN 'Android' ELSE 'Other' END#46, vs#12], functions=[partial_count(if ((gid#44 = 1)) u.`uid`#47 else null)])
+               +- *(3) HashAggregate(keys=[date_trunc('year', CAST(u.`dt` AS TIMESTAMP))#45, CASE WHEN (h.`pid` = 3) THEN 'iOS' WHEN (h.`pid` = 4) THEN 'Android' ELSE 'Other' END#46, vs#12, u.`uid`#47, u.`suid`#48, gid#44], functions=[])
+                  +- Exchange hashpartitioning(date_trunc('year', CAST(u.`dt` AS TIMESTAMP))#45, CASE WHEN (h.`pid` = 3) THEN 'iOS' WHEN (h.`pid` = 4) THEN 'Android' ELSE 'Other' END#46, vs#12, u.`uid`#47, u.`suid`#48, gid#44, 200), true, [id=#241]
+                     +- *(2) HashAggregate(keys=[date_trunc('year', CAST(u.`dt` AS TIMESTAMP))#45, CASE WHEN (h.`pid` = 3) THEN 'iOS' WHEN (h.`pid` = 4) THEN 'Android' ELSE 'Other' END#46, vs#12, u.`uid`#47, u.`suid`#48, gid#44], functions=[])
+                        +- *(2) Filter (CASE WHEN (h.`pid` = 3) THEN 'iOS' WHEN (h.`pid` = 4) THEN 'Android' ELSE 'Other' END#46 = iOS)
+                           +- *(2) Expand [ArrayBuffer(date_trunc(year, cast(dt#9 as timestamp), Some(Etc/GMT+7)), CASE WHEN (pid#11 = 3) THEN iOS WHEN (pid#11 = 4) THEN Android ELSE Other END, vs#12, uid#7, null, 1), ArrayBuffer(date_trunc(year, cast(dt#9 as timestamp), Some(Etc/GMT+7)), CASE WHEN (pid#11 = 3) THEN iOS WHEN (pid#11 = 4) THEN Android ELSE Other END, vs#12, null, suid#10, 2)], [date_trunc('year', CAST(u.`dt` AS TIMESTAMP))#45, CASE WHEN (h.`pid` = 3) THEN 'iOS' WHEN (h.`pid` = 4) THEN 'Android' ELSE 'Other' END#46, vs#12, u.`uid`#47, u.`suid`#48, gid#44]
+                              +- *(2) Project [uid#7, dt#9, suid#10, pid#11, vs#12]
+                                 +- *(2) BroadcastHashJoin [uid#7], [uid#13], Inner, BuildRight
+                                    :- *(2) Project [uid#7, dt#9, suid#10]
+                                    :  +- *(2) Filter isnotnull(uid#7)
+                                    :     +- *(2) ColumnarToRow
+                                    :        +- FileScan parquet default.spark_33301_1[uid#7,dt#9,suid#10] Batched: true, DataFilters: [isnotnull(uid#7)], Format: Parquet, Location: InMemoryFileIndex[file:/root/spark-3.0.0-bin-hadoop3.2/spark-warehouse/spark_33301_1], PartitionFilters: [], PushedFilters: [IsNotNull(uid)], ReadSchema: struct<uid:int,dt:date,suid:int>
+                                    +- BroadcastExchange HashedRelationBroadcastMode(List(cast(input[2, int, true] as bigint))), [id=#233]
+                                       +- *(1) Project [pid#11, vs#12, uid#13]
+                                          +- *(1) Filter isnotnull(uid#13)
+                                             +- *(1) ColumnarToRow
+                                                +- FileScan parquet default.spark_33301_2[pid#11,vs#12,uid#13] Batched: true, DataFilters: [isnotnull(uid#13)], Format: Parquet, Location: InMemoryFileIndex[file:/root/spark-3.0.0-bin-hadoop3.2/spark-warehouse/spark_33301_2], PartitionFilters: [], PushedFilters: [IsNotNull(uid)], ReadSchema: struct<pid:int,vs:int,uid:int>
+{noformat}
+
+
+We can push down {{Filter (CASE WHEN (h.`pid` = 3) THEN 'iOS' WHEN (h.`pid` = 4) THEN 'Android' ELSE 'Other' END#46 = iOS)}}.
+"
+No python3 in docker images ,13356607,Resolved,Critical,Cannot Reproduce,04/Feb/21 00:16,06/Jul/21 02:08,3.0.1,"The spark-py container image doesn't receive the instruction to use python3 and defaults to python 2.7
+
+ 
+
+The worker container was build using the following commands
+{code:java}
+mkdir ./tmp
+wget -qO- https://www.mirrorservice.org/sites/ftp.apache.org/spark/spark-3.0.1/spark-3.0.1-bin-hadoop3.2.tgz | tar -C ./tmp/ -xzf -
+cd ../spark-3.0.1-bin-hadoop3.2/
+./bin/docker-image-tool.sh -r docker.io/timhughes -t spark-3.0.1-bin-hadoop3.2 -p kubernetes/dockerfiles/spark/bindings/python/Dockerfile build
+docker push docker.io/timhughes/spark-py:spark-3.0.1-bin-hadoop3.2{code}
+ 
+
+This is the code I am using to initialize the workers
+
+ 
+{code:java}
+import os
+from pyspark import SparkContext, SparkConf
+from pyspark.sql import SparkSession# Create Spark config for our Kubernetes based cluster manager
+sparkConf = SparkConf()
+sparkConf.setMaster(""k8s://https://kubernetes.default.svc.cluster.local:443"")
+sparkConf.setAppName(""spark"")
+sparkConf.set(""spark.kubernetes.container.image"", ""docker.io/timhughes/spark-py:spark-3.0.1-bin-hadoop3.2"")
+sparkConf.set(""spark.kubernetes.namespace"", ""spark"")
+sparkConf.set(""spark.executor.instances"", ""2"")
+sparkConf.set(""spark.executor.cores"", ""1"")
+sparkConf.set(""spark.driver.memory"", ""1024m"")
+sparkConf.set(""spark.executor.memory"", ""1024m"")
+sparkConf.set(""spark.kubernetes.pyspark.pythonVersion"", ""3"")
+sparkConf.set(""spark.kubernetes.authenticate.driver.serviceAccountName"", ""spark"")
+sparkConf.set(""spark.kubernetes.authenticate.serviceAccountName"", ""spark"")
+sparkConf.set(""spark.driver.port"", ""29413"")
+sparkConf.set(""spark.driver.host"", ""my-notebook-deployment.spark.svc.cluster.local"")
+# Initialize our Spark cluster, this will actually
+# generate the worker nodes.
+spark = SparkSession.builder.config(conf=sparkConf).getOrCreate()
+sc = spark.sparkContext
+{code}
+ "
+Loss of precision using SparkSQL shell on high-precision DECIMAL types,13483880,Resolved,Major,Invalid,29/Sep/22 16:29,06/Oct/22 01:52,3.2.1,"h3. Describe the bug
+
+We are trying to save {{DECIMAL}} values with high precision in a table using the SparkSQL shell. When we {{INSERT}} decimal values with precision higher than the standard double precision, precision is lost. (8.8888888888888888888e9 interpreted as 8888888888.8888900000 instead of 8888888888.8888888888).
+
+This seems to be caused by type inference at shell parsing inferring that the value is a double type.
+h3. To reproduce
+
+On Spark 3.2.1 (commit {{{}4f25b3f712{}}}), using {{{}spark-sql{}}}:
+{code:java}
+$SPARK_HOME/bin/spark-sql{code}
+In the shell:
+{code:java}
+CREATE TABLE t(c0 DECIMAL(20,10));         
+INSERT INTO t VALUES (8.8888888888888888888e9);                             
+SELECT * FROM t;{code}
+Executing the above gives this:
+{code:java}
+spark-sql> CREATE TABLE t(c0 DECIMAL(20,10));
+22/09/29 11:28:41 WARN ResolveSessionCatalog: A Hive serde table will be created as there is no table provider specified. You can set spark.sql.legacy.createHiveTableByDefault to false so that native data source table will be created instead.
+Time taken: 0.118 seconds
+spark-sql> INSERT INTO t VALUES (8.8888888888888888888e9);
+Time taken: 0.392 seconds
+spark-sql> SELECT * FROM t;
+8888888888.8888900000
+Time taken: 0.197 seconds, Fetched 1 row(s){code}
+h3. Expected behavior
+
+We expect the inserted value to retain the precision as determined by the parameters for the {{DECIMAL}} type. For example, we expect the example above to return {{{}8888888888.8888888888{}}}."
+Add ANOVATest example,13295020,Resolved,Minor,Fixed,30/Mar/20 15:30,31/Mar/20 21:34,3.1.0,"Add ANOVATest examples (Scala, Java and Python)"
+NPE for static partion with null in InsertIntoHadoopFsRelationCommand,13354384,Resolved,Major,Fixed,25/Jan/21 11:04,26/Jan/21 04:27,3.0.1,"a test case
+{code:java}
+ test(""NPE"") {
+    withTable(""t"") {
+      sql(s""CREATE TABLE t(i STRING, c string) USING $format PARTITIONED BY (c)"")
+      sql(""INSERT OVERWRITE t PARTITION (c=null) VALUES ('1')"")
+      checkAnswer(spark.table(""t""), Row(""1"", null))
+    }
+  }
+{code}
+"
+Wrong error message for incorrect ANSI intervals,13568684,Resolved,Minor,Fixed,16/Feb/24 07:54,16/Feb/24 11:20,3.4.2,"When Spark SQL cannot recognise ANSI interval, it outputs wrong pattern for particular ANSI interval. For example, it cannot recognise year-month interval, but says about day-time interval:
+
+{code:sql}
+spark-sql (default)> select interval '-\t2-2\t' year to month;
+
+Interval string does not match year-month format of `[+|-]d h`, `INTERVAL [+|-]'[+|-]d h' DAY TO HOUR` when cast to interval year to month: -	2-2	. (line 1, pos 16)
+
+== SQL ==
+select interval '-\t2-2\t' year to month
+----------------^^^
+{code}
+"
+Create ANY_VALUE aggregate function,13445481,Resolved,Major,Fixed,17/May/22 17:44,20/May/22 19:29,3.4.0,This is a feature request to add an \{{ANY_VALUE}} aggregate function. This would consume input values and quickly return any arbitrary element.
+Log stacktrace when SparkContext.stop() is called,13577034,Resolved,Major,Fixed,24/Apr/24 08:30,25/Apr/24 06:11,4.0.0,We should log stacktrace when SparkContext.stop() is called for better debuggability.
+Spark SQL functions documentation refers to SQL API documentation without linking to it,13309528,Resolved,Trivial,Fixed,04/Jun/20 20:04,20/Jul/21 13:03,2.4.5,"h2. Problem description
+
+[The org.apache.spark.sql.functions documentation|http://spark.apache.org/docs/latest/api/scala/index.html#org.apache.spark.sql.functions$] claims that:
+{quote}(...) You can find the entire list of functions at SQL API documentation.
+
+(...)
+
+regr_count is an example of a function that is built-in but not defined here, because it is less commonly used. To invoke it, use expr(""regr_count(yCol, xCol)"").
+{quote}
+h2. Issue 1
+
+I had to roam a little bit to arrive at: [https://spark.apache.org/docs/latest/api/sql/index.html]. Is this the ""SQL API documentation"" to which the text refers? If so, I suggest adding this link there.
+h2. Issue 2
+
+The documentation cites the function 'regr_count', but I couldn't find its documentation in the SQL API https://spark.apache.org/docs/latest/api/sql/index.html. The issue https://issues.apache.org/jira/browse/SPARK-23907 is related to this function. Where is the documentation for this function? 
+
+ "
+CAST(x as int) does not generate error with overflow,13528009,Resolved,Major,Fixed,10/Mar/23 16:27,13/Mar/23 08:00,3.2.1,"Hi,
+
+When performing the following code:
+
+{{select cast(7.415246799222789E19 as int)}}
+
+according to the documentation, an error is expected as {{7.415246799222789E19 }}is an overflow value for datatype INT.
+
+However, the value 2147483647 is returned. 
+
+The behaviour of the following is correct as it returns NULL:
+
+{{select try_cast(7.415246799222789E19 as int) }}
+
+This results in unexpected behaviour and data corruption."
+Allow Project to host outer references in scalar subqueries,13387998,Resolved,Major,Fixed,06/Jul/21 18:42,07/Jul/21 04:26,3.2.0,"Support Project to host outer references in subqueries, for example:
+{code:sql}
+SELECT (SELECT c1) FROM t
+{code}
+
+Currently, it will throw AnalysisException:
+{code}
+org.apache.spark.sql.AnalysisException: Expressions referencing the outer query are not supported outside of WHERE/HAVING clauses
+{code}"
+Add approved TPCDS plan under ANSI mode ,13429699,Resolved,Major,Fixed,21/Feb/22 11:18,21/Feb/22 13:29,3.3.0,For passing TPCDS plan stability tests under ANSI mode
+Close KubernetesClient in K8S integrations tests,13429105,Resolved,Minor,Fixed,17/Feb/22 13:47,23/Feb/22 03:28,3.2.1,The implementations of org.apache.spark.deploy.k8s.integrationtest.backend.IntegrationTestBackend should close their KubernetesClient instance in #cleanUp() method.
+OracleIntegrationSuite is flaky because of ORA-04021,13563563,Resolved,Major,Fixed,04/Jan/24 10:01,04/Jan/24 18:44,4.0.0,"{code:java}
+24/01/04 04:22:09.270 pool-1-thread-1 INFO OracleIntegrationSuite: 
+===== CONTAINER LOGS FOR container Id: CreateContainerResponse(id=a57f47c6c42f6307ab855bb6f940b97a046b23ea41607d9742e2c32fbe6aea19, warnings=[]) =====24/01/04 04:22:09.272 pool-1-thread-1 INFO OracleIntegrationSuite: 
+===== END OF CONTAINER LOGS FOR container Id: CreateContainerResponse(id=a57f47c6c42f6307ab855bb6f940b97a046b23ea41607d9742e2c32fbe6aea19, warnings=[]) =====24/01/04 04:22:09.275 docker-java-stream-568158377 INFO OracleIntegrationSuite: STDOUT: CONTAINER: starting up...24/01/04 04:22:09.275 docker-java-stream-568158377 INFO OracleIntegrationSuite: STDOUT: CONTAINER: first database startup, initializing...24/01/04 04:22:09.275 docker-java-stream-568158377 INFO OracleIntegrationSuite: STDOUT: CONTAINER: uncompressing database data files, please wait...24/01/04 04:22:09.275 docker-java-stream-568158377 INFO OracleIntegrationSuite: STDOUT: CONTAINER: done uncompressing database data files, duration: 7 seconds.24/01/04 04:22:09.275 docker-java-stream-568158377 INFO OracleIntegrationSuite: STDOUT: CONTAINER: starting up Oracle Database...24/01/04 04:22:09.276 docker-java-stream-568158377 INFO OracleIntegrationSuite: STDOUT: 24/01/04 04:22:09.276 docker-java-stream-568158377 INFO OracleIntegrationSuite: STDOUT: LSNRCTL for Linux: Version 23.0.0.0.0 - Production on 04-JAN-2024 04:15:1524/01/04 04:22:09.276 docker-java-stream-568158377 INFO OracleIntegrationSuite: STDOUT: 24/01/04 04:22:09.276 docker-java-stream-568158377 INFO OracleIntegrationSuite: STDOUT: Copyright (c) 1991, 2023, Oracle.  All rights reserved.24/01/04 04:22:09.277 docker-java-stream-568158377 INFO OracleIntegrationSuite: STDOUT: 24/01/04 04:22:09.277 docker-java-stream-568158377 INFO OracleIntegrationSuite: STDOUT: Starting /opt/oracle/product/23c/dbhomeFree/bin/tnslsnr: please wait...24/01/04 04:22:09.277 docker-java-stream-568158377 INFO OracleIntegrationSuite: STDOUT: 24/01/04 04:22:09.277 docker-java-stream-568158377 INFO OracleIntegrationSuite: STDOUT: TNSLSNR for Linux: Version 23.0.0.0.0 - Production24/01/04 04:22:09.277 docker-java-stream-568158377 INFO OracleIntegrationSuite: STDOUT: System parameter file is /opt/oracle/product/23c/dbhomeFree/network/admin/listener.ora24/01/04 04:22:09.278 docker-java-stream-568158377 INFO OracleIntegrationSuite: STDOUT: Log messages written to /opt/oracle/diag/tnslsnr/a57f47c6c42f/listener/alert/log.xml24/01/04 04:22:09.278 docker-java-stream-568158377 INFO OracleIntegrationSuite: STDOUT: Listening on: (DESCRIPTION=(ADDRESS=(PROTOCOL=ipc)(KEY=EXTPROC_FOR_FREE)))24/01/04 04:22:09.278 docker-java-stream-568158377 INFO OracleIntegrationSuite: STDOUT: Listening on: (DESCRIPTION=(ADDRESS=(PROTOCOL=tcp)(HOST=0.0.0.0)(PORT=1521)))24/01/04 04:22:09.278 docker-java-stream-568158377 INFO OracleIntegrationSuite: STDOUT: 24/01/04 04:22:09.279 docker-java-stream-568158377 INFO OracleIntegrationSuite: STDOUT: Connecting to (DESCRIPTION=(ADDRESS=(PROTOCOL=IPC)(KEY=EXTPROC_FOR_FREE)))24/01/04 04:22:09.279 docker-java-stream-568158377 INFO OracleIntegrationSuite: STDOUT: STATUS of the LISTENER24/01/04 04:22:09.279 docker-java-stream-568158377 INFO OracleIntegrationSuite: STDOUT: ------------------------24/01/04 04:22:09.279 docker-java-stream-568158377 INFO OracleIntegrationSuite: STDOUT: Alias                     LISTENER24/01/04 04:22:09.279 docker-java-stream-568158377 INFO OracleIntegrationSuite: STDOUT: Version                   TNSLSNR for Linux: Version 23.0.0.0.0 - Production24/01/04 04:22:09.279 docker-java-stream-568158377 INFO OracleIntegrationSuite: STDOUT: Start Date                04-JAN-2024 04:15:1724/01/04 04:22:09.280 docker-java-stream-568158377 INFO OracleIntegrationSuite: STDOUT: Uptime                    0 days 0 hr. 0 min. 1 sec24/01/04 04:22:09.280 docker-java-stream-568158377 INFO OracleIntegrationSuite: STDOUT: Trace Level               off24/01/04 04:22:09.280 docker-java-stream-568158377 INFO OracleIntegrationSuite: STDOUT: Security                  ON: Local OS Authentication24/01/04 04:22:09.280 docker-java-stream-568158377 INFO OracleIntegrationSuite: STDOUT: SNMP                      OFF24/01/04 04:22:09.280 docker-java-stream-568158377 INFO OracleIntegrationSuite: STDOUT: Default Service           FREE24/01/04 04:22:09.281 docker-java-stream-568158377 INFO OracleIntegrationSuite: STDOUT: Listener Parameter File   /opt/oracle/product/23c/dbhomeFree/network/admin/listener.ora24/01/04 04:22:09.281 docker-java-stream-568158377 INFO OracleIntegrationSuite: STDOUT: Listener Log File         /opt/oracle/diag/tnslsnr/a57f47c6c42f/listener/alert/log.xml24/01/04 04:22:09.281 docker-java-stream-568158377 INFO OracleIntegrationSuite: STDOUT: Listening Endpoints Summary...24/01/04 04:22:09.281 docker-java-stream-568158377 INFO OracleIntegrationSuite: STDOUT: (DESCRIPTION=(ADDRESS=(PROTOCOL=ipc)(KEY=EXTPROC_FOR_FREE)))24/01/04 04:22:09.281 docker-java-stream-568158377 INFO OracleIntegrationSuite: STDOUT: (DESCRIPTION=(ADDRESS=(PROTOCOL=tcp)(HOST=0.0.0.0)(PORT=1521)))24/01/04 04:22:09.281 docker-java-stream-568158377 INFO OracleIntegrationSuite: STDOUT: The listener supports no services24/01/04 04:22:09.282 docker-java-stream-568158377 INFO OracleIntegrationSuite: STDOUT: The command completed successfully24/01/04 04:22:09.282 docker-java-stream-568158377 INFO OracleIntegrationSuite: STDOUT: ORACLE instance started.24/01/04 04:22:09.282 docker-java-stream-568158377 INFO OracleIntegrationSuite: STDOUT: 24/01/04 04:22:09.282 docker-java-stream-568158377 INFO OracleIntegrationSuite: STDOUT: Total System Global Area 1603679416 bytes24/01/04 04:22:09.282 docker-java-stream-568158377 INFO OracleIntegrationSuite: STDOUT: Fixed Size          5313720 bytes24/01/04 04:22:09.283 docker-java-stream-568158377 INFO OracleIntegrationSuite: STDOUT: Variable Size         738197504 bytes24/01/04 04:22:09.283 docker-java-stream-568158377 INFO OracleIntegrationSuite: STDOUT: Database Buffers      855638016 bytes24/01/04 04:22:09.283 docker-java-stream-568158377 INFO OracleIntegrationSuite: STDOUT: Redo Buffers            4530176 bytes24/01/04 04:22:09.283 docker-java-stream-568158377 INFO OracleIntegrationSuite: STDOUT: Database mounted.24/01/04 04:22:09.283 docker-java-stream-568158377 INFO OracleIntegrationSuite: STDOUT: Database opened.24/01/04 04:22:09.283 docker-java-stream-568158377 INFO OracleIntegrationSuite: STDOUT: 24/01/04 04:22:09.284 docker-java-stream-568158377 INFO OracleIntegrationSuite: STDOUT: CONTAINER: Resetting SYS and SYSTEM passwords.24/01/04 04:22:09.284 docker-java-stream-568158377 INFO OracleIntegrationSuite: STDOUT: 24/01/04 04:22:09.284 docker-java-stream-568158377 INFO OracleIntegrationSuite: STDOUT: User altered.24/01/04 04:22:09.284 docker-java-stream-568158377 INFO OracleIntegrationSuite: STDOUT: 24/01/04 04:22:09.284 docker-java-stream-568158377 INFO OracleIntegrationSuite: STDOUT: ALTER USER SYSTEM IDENTIFIED BY ""Th1s1sThe0racle#Pass""24/01/04 04:22:09.284 docker-java-stream-568158377 INFO OracleIntegrationSuite: STDOUT: *24/01/04 04:22:09.284 docker-java-stream-568158377 INFO OracleIntegrationSuite: STDOUT: ERROR at line 1:24/01/04 04:22:09.285 docker-java-stream-568158377 INFO OracleIntegrationSuite: STDOUT: ORA-65048: error encountered when processing the current DDL statement in24/01/04 04:22:09.285 docker-java-stream-568158377 INFO OracleIntegrationSuite: STDOUT: pluggable database FREEPDB124/01/04 04:22:09.285 docker-java-stream-568158377 INFO OracleIntegrationSuite: STDOUT: ORA-04021: timeout occurred while waiting to lock object24/01/04 04:22:09.285 docker-java-stream-568158377 INFO OracleIntegrationSuite: STDOUT: Help: https://docs.oracle.com/error-help/db/ora-65048/24/01/04 04:22:09.285 docker-java-stream-568158377 INFO OracleIntegrationSuite: STDOUT: 24/01/04 04:22:09.285 docker-java-stream-568158377 INFO OracleIntegrationSuite: STDOUT:  {code}"
+Refactor two similar test cases from SPARK-31061 in HiveExternalCatalogSuite,13314642,Resolved,Major,Fixed,02/Jul/20 09:58,02/Jul/20 17:15,3.0.0,"In `org.apache.spark.sql.hive.HiveExternalCatalogSuite`
+
+`
+
+test(""SPARK-31061: alterTable should be able to change table provider"") {
+ val catalog = newBasicCatalog()
+ val parquetTable = CatalogTable(
+ identifier = TableIdentifier(""parq_tbl"", Some(""db1"")),
+ tableType = CatalogTableType.MANAGED,
+ storage = storageFormat.copy(locationUri = Some(new URI(""file:/some/path""))),
+ schema = new StructType().add(""col1"", ""int"").add(""col2"", ""string""),
+ provider = Some(""parquet""))
+ catalog.createTable(parquetTable, ignoreIfExists = false)
+
+ val rawTable = externalCatalog.getTable(""db1"", ""parq_tbl"")
+ assert(rawTable.provider === Some(""parquet""))
+
+ val fooTable = *parquetTable*.copy(provider = Some(""foo"")) <- `*parquetTable*` seems should be rawTable
+ catalog.alterTable(fooTable)
+ val alteredTable = externalCatalog.getTable(""db1"", ""parq_tbl"")
+ assert(alteredTable.provider === Some(""foo""))
+}
+
+test(""SPARK-31061: alterTable should be able to change table provider from hive"") {
+ val catalog = newBasicCatalog()
+ val hiveTable = CatalogTable(
+ identifier = TableIdentifier(""parq_tbl"", Some(""db1"")),
+ tableType = CatalogTableType.MANAGED,
+ storage = storageFormat,
+ schema = new StructType().add(""col1"", ""int"").add(""col2"", ""string""),
+ provider = Some(""hive""))
+ catalog.createTable(hiveTable, ignoreIfExists = false)
+
+ val rawTable = externalCatalog.getTable(""db1"", ""parq_tbl"")
+ assert(rawTable.provider === Some(""hive""))
+
+ val fooTable = rawTable.copy(provider = Some(""foo""))
+ catalog.alterTable(fooTable)
+ val alteredTable = externalCatalog.getTable(""db1"", ""parq_tbl"")
+ assert(alteredTable.provider === Some(""foo""))
+}
+
+`
+
+ "
