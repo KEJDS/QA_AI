@@ -25,7 +25,7 @@ genai.configure(api_key=st.secrets["GOOGLE_API_KEY"])
 
 @st.cache_resource
 def load_chat_model():
-    return genai.GenerativeModel('gemini-2.5-flash')
+    return genai.GenerativeModel('models/gemini-3.8-flash')
 
 @st.cache_resource
 def load_local_ml_pipeline():
