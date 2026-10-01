@@ -20,13 +20,62 @@ DB_PATH = os.path.join(BASE_DIR, "chat_logs.db")
 VEC_PATH = os.path.join(BASE_DIR, "GitBugs", "tfidf_vectorizer.pkl")
 CLF_PATH = os.path.join(BASE_DIR, "GitBugs", "logistic_regression_validator.pkl")
 
+# --- API AND ML MODEL LOADING ---
+genai.configure(api_key=st.secrets["GOOGLE_API_KEY"])
+
+@st.cache_resource
+def load_chat_model():
+    return genai.GenerativeModel('models/gemini-3.6-flash')
+
+@st.cache_resource
+def load_local_ml_pipeline():
+    """Loads the TF-IDF Vectorizer and Logistic Regression Classifier from the GitBugs folder."""
+    vectorizer = joblib.load(VEC_PATH)
+    validator = joblib.load(CLF_PATH)
+    return vectorizer, validator
+
+chat_model = load_chat_model()
+vectorizer, validator = load_local_ml_pipeline()
+
+def evaluate_bug_report(raw_text):
+    """Runs the TF-IDF + Logistic Regression classifier and returns (status, confidence%)."""
+    clean_input = raw_text.strip()
+    text_lower = clean_input.lower()
+    word_count = len(clean_input.split())
+
+    features = vectorizer.transform([clean_input])
+    probabilities = validator.predict_proba(features)[0]
+    class_labels = list(validator.classes_)
+
+    ml_prediction = validator.predict(features)[0]
+    has_structure = ("steps" in text_lower or "reproduce" in text_lower) and ("expected" in text_lower or "actual" in text_lower)
+
+    if word_count < 15:
+        final_prediction = "Missing_Details"
+    elif has_structure or ml_prediction == "Valid":
+        final_prediction = "Valid"
+    else:
+        final_prediction = "Missing_Details"
+
+    # Get the exact probability for the predicted class
+    if final_prediction in class_labels:
+        idx = class_labels.index(final_prediction)
+        confidence = round(probabilities[idx] * 100, 2)
+    else:
+        confidence = round(max(probabilities) * 100, 2)
+
+    # Ensure rule-triggered overrides show realistic confidence (>50%)
+    if confidence < 50.0:
+        confidence = round(100.0 - confidence, 2)
+
+    return final_prediction, confidence
+
 # --- DATABASE SETUP & SESSION MANAGEMENT ---
 def init_db():
     """Initializes the SQLite database with Sessions and ChatHistory tables."""
     conn = sqlite3.connect(DB_PATH)
     cursor = conn.cursor()
     
-    # Table for managing chat sessions
     cursor.execute('''
         CREATE TABLE IF NOT EXISTS Sessions (
             session_id TEXT PRIMARY KEY,
@@ -37,7 +86,6 @@ def init_db():
         )
     ''')
     
-    # Table for storing individual messages linked to a session
     cursor.execute('''
         CREATE TABLE IF NOT EXISTS ChatHistory (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -85,7 +133,7 @@ def get_all_sessions():
     return records
 
 def load_session(session_id):
-    """Loads a previous session's context and messages into the active state."""
+    """Loads a previous session's context, messages, and recalculates its exact confidence."""
     conn = sqlite3.connect(DB_PATH)
     cursor = conn.cursor()
     
@@ -95,7 +143,11 @@ def load_session(session_id):
     if session_data:
         st.session_state.session_id = session_id
         st.session_state.current_report = session_data[0]
-        st.session_state.prediction = session_data[1]
+        
+        # Recalculate confidence for THIS specific report so it never reuses the previous chat's score
+        pred_status, conf_score = evaluate_bug_report(session_data[0])
+        st.session_state.prediction = session_data[1] if session_data[1] else pred_status
+        st.session_state.confidence = conf_score
         
         cursor.execute("SELECT role, content FROM ChatHistory WHERE session_id = ? ORDER BY id ASC", (session_id,))
         messages = cursor.fetchall()
@@ -117,23 +169,6 @@ init_db()
 # Session tracking
 if "session_id" not in st.session_state:
     st.session_state.session_id = str(uuid.uuid4())
-
-# --- API AND ML MODEL LOADING ---
-genai.configure(api_key=st.secrets["GOOGLE_API_KEY"])
-
-@st.cache_resource
-def load_chat_model():
-    return genai.GenerativeModel('models/gemini-3.6-flash')
-
-@st.cache_resource
-def load_local_ml_pipeline():
-    """Loads the TF-IDF Vectorizer and Logistic Regression Classifier from the GitBugs folder."""
-    vectorizer = joblib.load(VEC_PATH)
-    validator = joblib.load(CLF_PATH)
-    return vectorizer, validator
-
-chat_model = load_chat_model()
-vectorizer, validator = load_local_ml_pipeline()
 
 # --- TEXT EXTRACTION FUNCTION ---
 def extract_text_from_file(uploaded_file):
@@ -208,7 +243,6 @@ st.markdown("""
         .stButton>button:hover {
             box-shadow: 0 4px 6px rgba(0,0,0,0.05);
         }
-        /* Style for the history buttons to look like clean links */
         .history-btn>button {
             text-align: left;
             border: none;
@@ -253,7 +287,6 @@ with st.sidebar:
             for sess_id, title, timestamp in sessions:
                 date_str = timestamp.split(" ")[0] 
                 
-                # Clicking a history button loads that session
                 if st.button(f"{title} ({date_str})", key=sess_id, help="Click to resume this triage session"):
                     load_session(sess_id)
                     st.rerun()
@@ -278,28 +311,12 @@ if "current_report" not in st.session_state:
                 st.warning("Please enter a defect description before proceeding.")
             else:
                 clean_input = user_input.strip()
-                text_lower = clean_input.lower()
-                word_count = len(clean_input.split())
-                
-                # Phase 1: TF-IDF Vectorization + Logistic Regression Validation
-                features = vectorizer.transform([clean_input])
-                ml_prediction = validator.predict(features)[0]
-                confidence = max(validator.predict_proba(features)[0]) * 100
-                
-                # Structural keyword check + minimum length gatekeeper
-                has_structure = ("steps" in text_lower or "reproduce" in text_lower) and ("expected" in text_lower or "actual" in text_lower)
-                
-                if word_count < 15:
-                    final_prediction = "Missing_Details"
-                elif has_structure or ml_prediction == "Valid":
-                    final_prediction = "Valid"
-                else:
-                    final_prediction = "Missing_Details"
+                final_prediction, confidence = evaluate_bug_report(clean_input)
                 
                 # Save state
                 st.session_state.current_report = clean_input
                 st.session_state.prediction = final_prediction
-                st.session_state.confidence = round(confidence, 2)
+                st.session_state.confidence = confidence
                 
                 # Log session in database
                 create_session(st.session_state.session_id, clean_input, st.session_state.prediction)
