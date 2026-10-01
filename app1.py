@@ -25,7 +25,7 @@ genai.configure(api_key=st.secrets["GOOGLE_API_KEY"])
 
 @st.cache_resource
 def load_chat_model():
-    return genai.GenerativeModel('models/gemini-3.6-flash')
+    return genai.GenerativeModel('gemini-2.5-flash')
 
 @st.cache_resource
 def load_local_ml_pipeline():
@@ -270,8 +270,13 @@ def generate_ai_response(user_question, bug_report_context, prediction_status, g
     try:
         response = chat_model.generate_content(prompt, stream=stream)
         return response if stream else response.text
-    except Exception as e:
-        return f"I encountered an error connecting to the cloud AI: {e}"
+    except Exception:
+        # Automatic fallback to non-streaming if stream=True fails on Streamlit Cloud
+        try:
+            fallback_response = chat_model.generate_content(prompt, stream=False)
+            return fallback_response.text
+        except Exception as e:
+            return f"I encountered an error connecting to the cloud AI: {e}"
 
 # --- STREAMLIT UI ---
 if "messages" not in st.session_state:
@@ -428,6 +433,7 @@ else:
             with st.chat_message(message["role"]):
                 st.markdown(message["content"])
 
+    # --- THIS BLOCK REPLACES THE LAST 33 LINES AT THE VERY BOTTOM OF APP1.PY ---
     if prompt_input := st.chat_input("Enter a query regarding this report..."):
         st.session_state.messages.append({"role": "user", "content": prompt_input})
         save_message(st.session_state.session_id, "user", prompt_input)
@@ -451,9 +457,23 @@ else:
             else:
                 def stream_text():
                     full_text = ""
-                    for chunk in response_stream:
-                        full_text += chunk.text
-                        yield chunk.text
+                    try:
+                        for chunk in response_stream:
+                            if chunk.text:
+                                full_text += chunk.text
+                                yield chunk.text
+                    except Exception:
+                        # Automatic fallback if streaming connection drops mid-response
+                        if not full_text:
+                            fallback_reply = generate_ai_response(
+                                user_question=prompt_input,
+                                bug_report_context=st.session_state.current_report,
+                                prediction_status=st.session_state.prediction,
+                                guideline_text=custom_guideline_text,
+                                stream=False
+                            )
+                            full_text = fallback_reply
+                            yield fallback_reply
                     save_message(st.session_state.session_id, "assistant", full_text)
                 
                 full_reply = st.write_stream(stream_text)
