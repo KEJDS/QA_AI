@@ -21,12 +21,11 @@ VEC_PATH = os.path.join(BASE_DIR, "GitBugs", "tfidf_vectorizer.pkl")
 CLF_PATH = os.path.join(BASE_DIR, "GitBugs", "logistic_regression_validator.pkl")
 
 # --- API AND ML MODEL LOADING ---
-# transport="rest" prevents gRPC (_MultiThreadedRendezvous) crashes on Streamlit Cloud
-genai.configure(api_key=st.secrets["GOOGLE_API_KEY"], transport="rest")
+genai.configure(api_key=st.secrets["GOOGLE_API_KEY"])
 
 @st.cache_resource
 def load_chat_model():
-    return genai.GenerativeModel('gemini-2.5-flash')
+    return genai.GenerativeModel('models/gemini-3.6-flash')
 
 @st.cache_resource
 def load_local_ml_pipeline():
