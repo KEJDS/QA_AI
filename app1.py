@@ -209,19 +209,36 @@ def export_to_external_system(bug_report, prediction):
     short_summary = bug_report.replace("\n", " ").strip()[:50]
     issue_title = f"[{prediction}] {short_summary}..."
 
-    issue_body = f"""### Automated BugTriage-NLP Report
-**Validation Status:** `{prediction}` ({st.session_state.get('confidence', 'N/A')}%)
+    issue_body = (
+        f"### Automated BugTriage-NLP Report\n"
+        f"**Validation Status:** `{prediction}` ({st.session_state.get('confidence', 'N/A')}%)\n\n"
+        f"---\n"
+        f"### AI Triage & Restructured Output\n"
+        f"{latest_ai_reply}\n\n"
+        f"---\n"
+        f"<details>\n"
+        f"<summary><b>View Original Raw Bug Report</b></summary>\n\n"
+        f"<pre>{bug_report}</pre>\n"
+        f"</details>"
+    )
 
----
-### AI Triage & Restructured Output
-{latest_ai_reply}
+    payload = {
+        "title": issue_title,
+        "body": issue_body,
+        "labels": ["bug", prediction]
+    }
 
----
-<details>
-<summary><b>View Original Raw Bug Report</b></summary>
-
-```text
-{bug_report}
+    try:
+        response = requests.post(url, json=payload, headers=headers, timeout=10)
+        if response.status_code == 201:
+            issue_url = response.json().get("html_url")
+            return True, issue_url
+        else:
+            st.error(f"GitHub API Error ({response.status_code}): {response.json().get('message')}")
+            return False, None
+    except Exception as e:
+        st.error(f"Failed to connect to GitHub: {e}")
+        return False, None
 
 def generate_ai_response(user_question, bug_report_context, prediction_status, guideline_text="", stream=False):
     if not bug_report_context or bug_report_context.strip() == "":
@@ -369,10 +386,14 @@ else:
     with action_col:
         st.caption("External Routing")
         if st.button("Export to Tracking System", use_container_width=True):
-            with st.spinner("Connecting to external API..."):
-                success = export_to_external_system(st.session_state.current_report, st.session_state.prediction)
+            with st.spinner("Exporting ticket to GitHub Issues (KEJDS/QA_Issues)..."):
+                success, issue_url = export_to_external_system(
+                    st.session_state.current_report, 
+                    st.session_state.prediction
+                )
                 if success:
-                    st.toast("Ticket successfully exported.")
+                    st.toast("Ticket successfully exported to GitHub!")
+                    st.success(f"Exported! [View Issue on GitHub]({issue_url})")
 
     st.markdown("### Triage Assistant")
     
