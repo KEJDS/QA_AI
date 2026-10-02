@@ -21,7 +21,8 @@ VEC_PATH = os.path.join(BASE_DIR, "GitBugs", "tfidf_vectorizer.pkl")
 CLF_PATH = os.path.join(BASE_DIR, "GitBugs", "logistic_regression_validator.pkl")
 
 # --- API AND ML MODEL LOADING ---
-genai.configure(api_key=st.secrets["GOOGLE_API_KEY"])
+# Change #1: Added transport="rest" to prevent gRPC crashes on Streamlit Cloud
+genai.configure(api_key=st.secrets["GOOGLE_API_KEY"], transport="rest")
 
 @st.cache_resource
 def load_chat_model():
@@ -240,6 +241,7 @@ def export_to_external_system(bug_report, prediction):
         st.error(f"Failed to connect to GitHub: {e}")
         return False, None
 
+# Change #2: Added Semantic Coherence Check to catch well-formatted but contradictory reports
 def generate_ai_response(user_question, bug_report_context, prediction_status, guideline_text="", stream=False):
     if not bug_report_context or bug_report_context.strip() == "":
         return "I do not have a bug report to look at yet. Please analyze one first."
@@ -254,7 +256,9 @@ def generate_ai_response(user_question, bug_report_context, prediction_status, g
     You are reviewing the following bug report:
     "{bug_report_context}"
     
-    The initial local Scikit-Learn Logistic Regression validation system flagged this report as: {prediction_status}.
+    The initial local Scikit-Learn Logistic Regression validation system flagged the structural format as: {prediction_status}.
+    
+    CRITICAL SEMANTIC CHECK: Even if the structural status is 'Valid', carefully verify whether the 'Steps to Reproduce', 'Expected Result', and 'Actual Result' logically match each other. If there is a contradiction, mismatch, or nonsensical flow between the steps and the results, explicitly flag a "⚠️ Logical/Semantic Mismatch Detected" at the top of your response and explain the discrepancy before restructuring.
     
     The user is asking you this question: "{user_question}"
     
@@ -263,20 +267,15 @@ def generate_ai_response(user_question, bug_report_context, prediction_status, g
     1. Standardized Title & Summary
     2. Identified Severity Level (Blocker, Critical, Major, Minor, or Trivial)
     3. Recommended Developer Routing / Component Assignment (e.g., Backend/Core, SQL/Database, UI/Frontend, API, or Network)
-    4. Structured Steps to Reproduce, Expected Result, and Actual Result (or list exact clarification questions if details are missing)
+    4. Structured Steps to Reproduce, Expected Result, and Actual Result (or list exact clarification questions if details are missing or contradictory)
     5. Probable Root-Cause Analysis based strictly on the context provided.
     If they ask an unrelated question, answer it briefly if you have the context, but gently steer them back to discussing the bug report.
     """
     try:
-        response = chat_model.generate_content(prompt, stream=stream)
-        return response if stream else response.text
-    except Exception:
-        # Automatic fallback to non-streaming if stream=True fails on Streamlit Cloud
-        try:
-            fallback_response = chat_model.generate_content(prompt, stream=False)
-            return fallback_response.text
-        except Exception as e:
-            return f"I encountered an error connecting to the cloud AI: {e}"
+        response = chat_model.generate_content(prompt, stream=False)
+        return response.text
+    except Exception as e:
+        return f"I encountered an error connecting to the cloud AI: {e}"
 
 # --- STREAMLIT UI ---
 if "messages" not in st.session_state:
@@ -433,7 +432,7 @@ else:
             with st.chat_message(message["role"]):
                 st.markdown(message["content"])
 
-    # --- THIS BLOCK REPLACES THE LAST 33 LINES AT THE VERY BOTTOM OF APP1.PY ---
+    # Change #3: Non-streaming chat input to prevent REST + stream=True 400 errors
     if prompt_input := st.chat_input("Enter a query regarding this report..."):
         st.session_state.messages.append({"role": "user", "content": prompt_input})
         save_message(st.session_state.session_id, "user", prompt_input)
@@ -442,39 +441,14 @@ else:
             st.markdown(prompt_input)
 
         with st.chat_message("assistant"):
-            response_stream = generate_ai_response(
-                user_question=prompt_input, 
-                bug_report_context=st.session_state.current_report,
-                prediction_status=st.session_state.prediction,
-                guideline_text=custom_guideline_text,
-                stream=True
-            )
-            
-            if isinstance(response_stream, str):
-                st.markdown(response_stream)
-                st.session_state.messages.append({"role": "assistant", "content": response_stream})
-                save_message(st.session_state.session_id, "assistant", response_stream)
-            else:
-                def stream_text():
-                    full_text = ""
-                    try:
-                        for chunk in response_stream:
-                            if chunk.text:
-                                full_text += chunk.text
-                                yield chunk.text
-                    except Exception:
-                        # Automatic fallback if streaming connection drops mid-response
-                        if not full_text:
-                            fallback_reply = generate_ai_response(
-                                user_question=prompt_input,
-                                bug_report_context=st.session_state.current_report,
-                                prediction_status=st.session_state.prediction,
-                                guideline_text=custom_guideline_text,
-                                stream=False
-                            )
-                            full_text = fallback_reply
-                            yield fallback_reply
-                    save_message(st.session_state.session_id, "assistant", full_text)
-                
-                full_reply = st.write_stream(stream_text)
-                st.session_state.messages.append({"role": "assistant", "content": full_reply})
+            with st.spinner("Thinking..."):
+                reply = generate_ai_response(
+                    user_question=prompt_input, 
+                    bug_report_context=st.session_state.current_report,
+                    prediction_status=st.session_state.prediction,
+                    guideline_text=custom_guideline_text,
+                    stream=False
+                )
+                st.markdown(reply)
+                st.session_state.messages.append({"role": "assistant", "content": reply})
+                save_message(st.session_state.session_id, "assistant", reply)
