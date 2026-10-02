@@ -21,7 +21,6 @@ VEC_PATH = os.path.join(BASE_DIR, "GitBugs", "tfidf_vectorizer.pkl")
 CLF_PATH = os.path.join(BASE_DIR, "GitBugs", "logistic_regression_validator.pkl")
 
 # --- API AND ML MODEL LOADING ---
-# Change #1: Added transport="rest" to prevent gRPC crashes on Streamlit Cloud
 genai.configure(api_key=st.secrets["GOOGLE_API_KEY"], transport="rest")
 
 @st.cache_resource
@@ -38,8 +37,28 @@ def load_local_ml_pipeline():
 chat_model = load_chat_model()
 vectorizer, validator = load_local_ml_pipeline()
 
-def evaluate_bug_report(raw_text):
-    """Runs the TF-IDF + Logistic Regression classifier and returns (status, confidence%)."""
+def verify_semantic_coherence(bug_text):
+    """Uses Gemini to verify if a structurally valid report is logically coherent."""
+    check_prompt = f"""
+    You are a strict QA validation gatekeeper. Read the following bug report:
+    "{bug_text}"
+    
+    Determine if the 'Steps to Reproduce', 'Expected Result', and 'Actual Result' logically pertain to the same software feature/context, or if they are completely unrelated/contradictory nonsense.
+    Reply with ONLY one word:
+    - Reply 'COHERENT' if the steps and results logically relate to each other (even if it describes a bug or crash).
+    - Reply 'CONTRADICTORY' if the expected/actual results have nothing to do with the steps (e.g., uploading a profile photo expects payroll tax calculation).
+    """
+    try:
+        res = chat_model.generate_content(check_prompt, stream=False)
+        verdict = res.text.strip().upper()
+        if "CONTRADICTORY" in verdict:
+            return False
+        return True
+    except Exception:
+        return True
+
+def evaluate_bug_report(raw_text, run_semantic_check=True):
+    """Runs Phase 1 (TF-IDF + LogReg) and Phase 2 (Semantic Coherence Check)."""
     clean_input = raw_text.strip()
     text_lower = clean_input.lower()
     word_count = len(clean_input.split())
@@ -58,16 +77,21 @@ def evaluate_bug_report(raw_text):
     else:
         final_prediction = "Missing_Details"
 
-    # Get the exact probability for the predicted class
+    # Calculate structural confidence score
     if final_prediction in class_labels:
         idx = class_labels.index(final_prediction)
         confidence = round(probabilities[idx] * 100, 2)
     else:
         confidence = round(max(probabilities) * 100, 2)
 
-    # Ensure rule-triggered overrides show realistic confidence (>50%)
     if confidence < 50.0:
         confidence = round(100.0 - confidence, 2)
+
+    # If structure is Valid, verify that the content isn't contradictory nonsense
+    if final_prediction == "Valid" and run_semantic_check:
+        is_coherent = verify_semantic_coherence(clean_input)
+        if not is_coherent:
+            final_prediction = "Logical_Mismatch"
 
     return final_prediction, confidence
 
@@ -145,8 +169,8 @@ def load_session(session_id):
         st.session_state.session_id = session_id
         st.session_state.current_report = session_data[0]
         
-        # Recalculate confidence for THIS specific report so it never reuses the previous chat's score
-        pred_status, conf_score = evaluate_bug_report(session_data[0])
+        # Recalculate structural confidence without re-calling Gemini API on history click
+        pred_status, conf_score = evaluate_bug_report(session_data[0], run_semantic_check=False)
         st.session_state.prediction = session_data[1] if session_data[1] else pred_status
         st.session_state.confidence = conf_score
         
@@ -202,11 +226,9 @@ def export_to_external_system(bug_report, prediction):
         "Accept": "application/vnd.github+json"
     }
 
-    # Grab the latest assistant message if the report was restructured/analyzed
     assistant_msgs = [m["content"] for m in st.session_state.messages if m["role"] == "assistant"]
     latest_ai_reply = assistant_msgs[-1] if assistant_msgs else "No AI restructuring performed yet."
 
-    # Create a concise issue title from the first line of the bug report
     short_summary = bug_report.replace("\n", " ").strip()[:50]
     issue_title = f"[{prediction}] {short_summary}..."
 
@@ -241,7 +263,6 @@ def export_to_external_system(bug_report, prediction):
         st.error(f"Failed to connect to GitHub: {e}")
         return False, None
 
-# Change #2: Added Semantic Coherence Check to catch well-formatted but contradictory reports
 def generate_ai_response(user_question, bug_report_context, prediction_status, guideline_text="", stream=False):
     if not bug_report_context or bug_report_context.strip() == "":
         return "I do not have a bug report to look at yet. Please analyze one first."
@@ -256,9 +277,9 @@ def generate_ai_response(user_question, bug_report_context, prediction_status, g
     You are reviewing the following bug report:
     "{bug_report_context}"
     
-    The initial local Scikit-Learn Logistic Regression validation system flagged the structural format as: {prediction_status}.
+    The validation pipeline flagged this report as: {prediction_status}.
     
-    CRITICAL SEMANTIC CHECK: Even if the structural status is 'Valid', carefully verify whether the 'Steps to Reproduce', 'Expected Result', and 'Actual Result' logically match each other. If there is a contradiction, mismatch, or nonsensical flow between the steps and the results, explicitly flag a "⚠️ Logical/Semantic Mismatch Detected" at the top of your response and explain the discrepancy before restructuring.
+    CRITICAL SEMANTIC CHECK: Carefully verify whether the 'Steps to Reproduce', 'Expected Result', and 'Actual Result' logically match each other. If there is a contradiction, mismatch, or nonsensical flow between the steps and the results, explicitly flag a "⚠️ Logical/Semantic Mismatch Detected" at the top of your response, explain the exact discrepancy, and list the clarification questions the reporter must answer before a developer can work on this ticket.
     
     The user is asking you this question: "{user_question}"
     
@@ -362,17 +383,18 @@ if "current_report" not in st.session_state:
             if user_input.strip() == "":
                 st.warning("Please enter a defect description before proceeding.")
             else:
-                clean_input = user_input.strip()
-                final_prediction, confidence = evaluate_bug_report(clean_input)
-                
-                # Save state
-                st.session_state.current_report = clean_input
-                st.session_state.prediction = final_prediction
-                st.session_state.confidence = confidence
-                
-                # Log session in database
-                create_session(st.session_state.session_id, clean_input, st.session_state.prediction)
-                st.rerun()
+                with st.spinner("Running structural & semantic validation..."):
+                    clean_input = user_input.strip()
+                    final_prediction, confidence = evaluate_bug_report(clean_input, run_semantic_check=True)
+                    
+                    # Save state
+                    st.session_state.current_report = clean_input
+                    st.session_state.prediction = final_prediction
+                    st.session_state.confidence = confidence
+                    
+                    # Log session in database
+                    create_session(st.session_state.session_id, clean_input, st.session_state.prediction)
+                    st.rerun()
 else:
     # Display the active report context if we are currently analyzing one
     with st.expander("View Active Defect Report Context", expanded=False):
@@ -384,6 +406,8 @@ else:
         conf_str = f" ({st.session_state.confidence}%)" if "confidence" in st.session_state else ""
         if st.session_state.prediction == "Valid":
             st.info(f"Status: Valid Structure{conf_str}")
+        elif st.session_state.prediction == "Logical_Mismatch":
+            st.warning(f"Status: Logical Mismatch (Structure: {st.session_state.confidence}%)")
         else:
             st.error(f"Status: Missing Details{conf_str}")
             
@@ -432,7 +456,6 @@ else:
             with st.chat_message(message["role"]):
                 st.markdown(message["content"])
 
-    # Change #3: Non-streaming chat input to prevent REST + stream=True 400 errors
     if prompt_input := st.chat_input("Enter a query regarding this report..."):
         st.session_state.messages.append({"role": "user", "content": prompt_input})
         save_message(st.session_state.session_id, "user", prompt_input)
