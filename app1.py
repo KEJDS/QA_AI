@@ -139,7 +139,7 @@ genai.configure(api_key=st.secrets["GOOGLE_API_KEY"])
 @st.cache_resource
 def load_chat_model():
     # Uses gemini-2.5-flash by default (or override via GEMINI_MODEL in secrets.toml)
-    model_name = st.secrets.get("GEMINI_MODEL", "gemini-2.8-flash")
+    model_name = st.secrets.get("GEMINI_MODEL", "gemini-3.8-flash")
     return genai.GenerativeModel(model_name)
 
 @st.cache_resource
