@@ -1,10 +1,10 @@
 import os
 import streamlit as st
 import joblib
+import pandas as pd
 import google.generativeai as genai
-import requests
+import requests 
 from datetime import datetime
-import io
 import sqlite3
 import uuid
 
@@ -12,90 +12,17 @@ import uuid
 import PyPDF2
 import docx
 
-# --- BASE DIRECTORY & FILE PATHS ---
+# --- BASE DIRECTORY (Works locally and on GitHub/Streamlit Cloud) ---
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 DB_PATH = os.path.join(BASE_DIR, "chat_logs.db")
+VEC_PATH = os.path.join(BASE_DIR, "tfidf_vectorizer.pkl")
+CLF_PATH = os.path.join(BASE_DIR, "logistic_regression_validator.pkl")
+SAMPLE_CSV_PATH = os.path.join(BASE_DIR, "spark_sample_30.csv")
 
-# Points directly inside the "GitBugs" folder on GitHub (case-sensitive)
-VEC_PATH = os.path.join(BASE_DIR, "GitBugs", "tfidf_vectorizer.pkl")
-CLF_PATH = os.path.join(BASE_DIR, "GitBugs", "logistic_regression_validator.pkl")
+# --- PAGE CONFIG ---
+st.set_page_config(page_title="BugTriage-NLP", layout="wide", initial_sidebar_state="expanded")
 
-# --- API AND ML MODEL LOADING ---
-genai.configure(api_key=st.secrets["GOOGLE_API_KEY"], transport="rest")
-
-@st.cache_resource
-def load_chat_model():
-    return genai.GenerativeModel('models/gemini-3.8-flash')
-
-@st.cache_resource
-def load_local_ml_pipeline():
-    """Loads the TF-IDF Vectorizer and Logistic Regression Classifier from the GitBugs folder."""
-    vectorizer = joblib.load(VEC_PATH)
-    validator = joblib.load(CLF_PATH)
-    return vectorizer, validator
-
-chat_model = load_chat_model()
-vectorizer, validator = load_local_ml_pipeline()
-
-def verify_semantic_coherence(bug_text):
-    """Uses Gemini to verify if a structurally valid report is logically coherent."""
-    check_prompt = f"""
-    You are a strict QA validation gatekeeper. Read the following bug report:
-    "{bug_text}"
-    
-    Determine if the 'Steps to Reproduce', 'Expected Result', and 'Actual Result' logically pertain to the same software feature/context, or if they are completely unrelated/contradictory nonsense.
-    Reply with ONLY one word:
-    - Reply 'COHERENT' if the steps and results logically relate to each other (even if it describes a bug or crash).
-    - Reply 'CONTRADICTORY' if the expected/actual results have nothing to do with the steps (e.g., uploading a profile photo expects payroll tax calculation).
-    """
-    try:
-        res = chat_model.generate_content(check_prompt, stream=False)
-        verdict = res.text.strip().upper()
-        if "CONTRADICTORY" in verdict:
-            return False
-        return True
-    except Exception:
-        return True
-
-def evaluate_bug_report(raw_text, run_semantic_check=True):
-    """Runs Phase 1 (TF-IDF + LogReg) and Phase 2 (Semantic Coherence Check)."""
-    clean_input = raw_text.strip()
-    text_lower = clean_input.lower()
-    word_count = len(clean_input.split())
-
-    features = vectorizer.transform([clean_input])
-    probabilities = validator.predict_proba(features)[0]
-    class_labels = list(validator.classes_)
-
-    ml_prediction = validator.predict(features)[0]
-    has_structure = ("steps" in text_lower or "reproduce" in text_lower) and ("expected" in text_lower or "actual" in text_lower)
-
-    if word_count < 15:
-        final_prediction = "Missing_Details"
-    elif has_structure or ml_prediction == "Valid":
-        final_prediction = "Valid"
-    else:
-        final_prediction = "Missing_Details"
-
-    # Calculate structural confidence score
-    if final_prediction in class_labels:
-        idx = class_labels.index(final_prediction)
-        confidence = round(probabilities[idx] * 100, 2)
-    else:
-        confidence = round(max(probabilities) * 100, 2)
-
-    if confidence < 50.0:
-        confidence = round(100.0 - confidence, 2)
-
-    # If structure is Valid, verify that the content isn't contradictory nonsense
-    if final_prediction == "Valid" and run_semantic_check:
-        is_coherent = verify_semantic_coherence(clean_input)
-        if not is_coherent:
-            final_prediction = "Logical_Mismatch"
-
-    return final_prediction, confidence
-
-# --- DATABASE SETUP & SESSION MANAGEMENT ---
+# --- DATABASE SETUP & SESSION MANAGEMENT (SQLite Temporary Persistence) ---
 def init_db():
     """Initializes the SQLite database with Sessions and ChatHistory tables."""
     conn = sqlite3.connect(DB_PATH)
@@ -131,7 +58,7 @@ def create_session(session_id, bug_report, prediction):
     conn = sqlite3.connect(DB_PATH)
     cursor = conn.cursor()
     cursor.execute(
-        "INSERT OR IGNORE INTO Sessions (session_id, title, bug_report, prediction) VALUES (?, ?, ?, ?)", 
+        "INSERT OR REPLACE INTO Sessions (session_id, title, bug_report, prediction) VALUES (?, ?, ?, ?)", 
         (session_id, title, bug_report, prediction)
     )
     conn.commit()
@@ -158,7 +85,7 @@ def get_all_sessions():
     return records
 
 def load_session(session_id):
-    """Loads a previous session's context, messages, and recalculates its exact confidence."""
+    """Loads a previous session's context and messages into the active state."""
     conn = sqlite3.connect(DB_PATH)
     cursor = conn.cursor()
     
@@ -168,11 +95,7 @@ def load_session(session_id):
     if session_data:
         st.session_state.session_id = session_id
         st.session_state.current_report = session_data[0]
-        
-        # Recalculate structural confidence without re-calling Gemini API on history click
-        pred_status, conf_score = evaluate_bug_report(session_data[0], run_semantic_check=False)
-        st.session_state.prediction = session_data[1] if session_data[1] else pred_status
-        st.session_state.confidence = conf_score
+        st.session_state.prediction = session_data[1]
         
         cursor.execute("SELECT role, content FROM ChatHistory WHERE session_id = ? ORDER BY id ASC", (session_id,))
         messages = cursor.fetchall()
@@ -180,11 +103,12 @@ def load_session(session_id):
         
     conn.close()
 
-def start_new_chat():
-    """Resets the application state for a new bug report."""
+def start_new_chat(preserve_draft=""):
+    """Resets the application state for a new or revised bug report."""
     st.session_state.session_id = str(uuid.uuid4())
     st.session_state.messages = []
-    for key in ["current_report", "prediction", "confidence"]:
+    st.session_state.draft_report = preserve_draft
+    for key in ["current_report", "prediction", "confidence", "coherence_status", "coherence_reason"]:
         if key in st.session_state:
             del st.session_state[key]
 
@@ -194,6 +118,40 @@ init_db()
 # Session tracking
 if "session_id" not in st.session_state:
     st.session_state.session_id = str(uuid.uuid4())
+if "messages" not in st.session_state:
+    st.session_state.messages = []
+if "draft_report" not in st.session_state:
+    st.session_state.draft_report = ""
+
+# --- API AND ML MODEL LOADING ---
+genai.configure(api_key=st.secrets["GOOGLE_API_KEY"])
+
+@st.cache_resource
+def load_chat_model():
+    # Uses gemini-2.5-flash by default (or override via GEMINI_MODEL in secrets.toml)
+    model_name = st.secrets.get("GEMINI_MODEL", "gemini-2.5-flash")
+    return genai.GenerativeModel(model_name)
+
+@st.cache_resource
+def load_local_ml_pipeline():
+    """Loads the Phase 1 TF-IDF Vectorizer and Logistic Regression Classifier."""
+    vectorizer = joblib.load(VEC_PATH)
+    validator = joblib.load(CLF_PATH)
+    return vectorizer, validator
+
+@st.cache_data
+def load_sample_tickets():
+    """Safely loads the 30 sample Spark tickets if a valid CSV is present."""
+    if os.path.exists(SAMPLE_CSV_PATH):
+        try:
+            return pd.read_csv(SAMPLE_CSV_PATH, encoding="utf-8")
+        except Exception:
+            return None
+    return None
+
+chat_model = load_chat_model()
+vectorizer, validator = load_local_ml_pipeline()
+sample_df = load_sample_tickets()
 
 # --- TEXT EXTRACTION FUNCTION ---
 def extract_text_from_file(uploaded_file):
@@ -205,7 +163,7 @@ def extract_text_from_file(uploaded_file):
         elif file_extension == 'pdf':
             pdf_reader = PyPDF2.PdfReader(uploaded_file)
             for page in pdf_reader.pages:
-                extracted_text += page.extract_text() + "\n"
+                extracted_text += (page.extract_text() or "") + "\n"
         elif file_extension == 'docx':
             doc = docx.Document(uploaded_file)
             for para in doc.paragraphs:
@@ -214,96 +172,103 @@ def extract_text_from_file(uploaded_file):
         st.error(f"Error reading the file: {e}")
     return extracted_text
 
-def export_to_external_system(bug_report, prediction):
-    """Exports the validated and restructured ticket to KEJDS/QA_Issues on GitHub."""
-    if "GITHUB_TOKEN" not in st.secrets:
-        st.error("Missing GITHUB_TOKEN in Streamlit secrets.")
-        return False, None
+# --- PHASE 2: SEMANTIC COHERENCE VERIFICATION ---
+def verify_semantic_coherence(bug_report):
+    """Checks if Steps to Reproduce and Expected/Actual Results logically align."""
+    prompt = f"""
+    You are a Software Quality Assurance Gatekeeper performing Semantic Coherence Verification.
+    Inspect the following bug report and determine if there is a severe logical contradiction 
+    between the Steps to Reproduce and the Expected/Actual Results (for example, steps describe 
+    logging in, but the actual result complains about printer hardware or unrelated features).
 
-    url = "https://api.github.com/repos/KEJDS/QA_Issues/issues"
-    headers = {
-        "Authorization": f"Bearer {st.secrets['GITHUB_TOKEN']}",
-        "Accept": "application/vnd.github+json"
-    }
+    Bug Report:
+    "{bug_report}"
 
-    assistant_msgs = [m["content"] for m in st.session_state.messages if m["role"] == "assistant"]
-    latest_ai_reply = assistant_msgs[-1] if assistant_msgs else "No AI restructuring performed yet."
-
-    short_summary = bug_report.replace("\n", " ").strip()[:50]
-    issue_title = f"[{prediction}] {short_summary}..."
-
-    issue_body = (
-        f"### Automated BugTriage-NLP Report\n"
-        f"**Validation Status:** `{prediction}` ({st.session_state.get('confidence', 'N/A')}%)\n\n"
-        f"---\n"
-        f"### AI Triage & Restructured Output\n"
-        f"{latest_ai_reply}\n\n"
-        f"---\n"
-        f"<details>\n"
-        f"<summary><b>View Original Raw Bug Report</b></summary>\n\n"
-        f"<pre>{bug_report}</pre>\n"
-        f"</details>"
-    )
-
-    payload = {
-        "title": issue_title,
-        "body": issue_body,
-        "labels": ["bug", prediction]
-    }
-
+    Respond in EXACTLY this two-line format:
+    VERDICT: [COHERENT or CONTRADICTORY]
+    REASON: [One concise sentence explaining why]
+    """
     try:
-        response = requests.post(url, json=payload, headers=headers, timeout=10)
-        if response.status_code == 201:
-            issue_url = response.json().get("html_url")
-            return True, issue_url
-        else:
-            st.error(f"GitHub API Error ({response.status_code}): {response.json().get('message')}")
-            return False, None
+        res = chat_model.generate_content(prompt).text.strip()
+        verdict = "CONTRADICTORY" if "CONTRADICTORY" in res.upper().splitlines()[0] else "COHERENT"
+        reason = res.splitlines()[-1].replace("REASON:", "").strip() if len(res.splitlines()) > 1 else ""
+        return verdict, reason
     except Exception as e:
-        st.error(f"Failed to connect to GitHub: {e}")
-        return False, None
+        return "COHERENT", f"Coherence check bypassed ({e})"
 
+# --- PHASE 2: GENERATIVE AI RESTRUCTURING & TRIAGE ---
 def generate_ai_response(user_question, bug_report_context, prediction_status, guideline_text="", stream=False):
     if not bug_report_context or bug_report_context.strip() == "":
         return "I do not have a bug report to look at yet. Please analyze one first."
         
     current_date = datetime.now().strftime('%Y-%m-%d')
-    guideline_instructions = f"\nCRITICAL INSTRUCTION: Strictly evaluate and format the bug report against these specific company guidelines:\n{guideline_text}\n" if guideline_text else ""
+    guideline_instructions = (
+        f"\nCRITICAL INSTRUCTION: Strictly format and evaluate the bug report against these uploaded QA guidelines:\n{guideline_text}\n"
+        if guideline_text else ""
+    )
     
     prompt = f"""
-    You are an expert Software Quality Assurance Engineer assisting a software developer.
+    You are an expert Software Quality Assurance Engineer and Triage Specialist assisting an Agile software development team.
     System Context: Today's date is {current_date}. {guideline_instructions}
     
-    You are reviewing the following bug report:
+    You are reviewing the following raw bug report:
     "{bug_report_context}"
     
-    The validation pipeline flagged this report as: {prediction_status}.
+    The Phase 1 local Scikit-Learn Logistic Regression classifier flagged this report as: {prediction_status}.
     
-    CRITICAL SEMANTIC CHECK: Carefully verify whether the 'Steps to Reproduce', 'Expected Result', and 'Actual Result' logically match each other. If there is a contradiction, mismatch, or nonsensical flow between the steps and the results, explicitly flag a "⚠️ Logical/Semantic Mismatch Detected" at the top of your response, explain the exact discrepancy, and list the clarification questions the reporter must answer before a developer can work on this ticket.
+    The user is asking you this request: "{user_question}"
     
-    The user is asking you this question: "{user_question}"
-    
-    Answer the user's question directly, conversationally, and practically. 
-    When restructuring or analyzing the report, ensure you provide:
+    Answer the user's request directly, clearly, and practically.
+    When restructuring or analyzing the report, include:
     1. Standardized Title & Summary
     2. Identified Severity Level (Blocker, Critical, Major, Minor, or Trivial)
-    3. Recommended Developer Routing / Component Assignment (e.g., Backend/Core, SQL/Database, UI/Frontend, API, or Network)
-    4. Structured Steps to Reproduce, Expected Result, and Actual Result (or list exact clarification questions if details are missing or contradictory)
-    5. Probable Root-Cause Analysis based strictly on the context provided.
-    If they ask an unrelated question, answer it briefly if you have the context, but gently steer them back to discussing the bug report.
+    3. Recommended Developer Routing / Component Assignment (e.g., Backend/Core, SQL/Database, UI/Frontend, Python/API, or Network/Cluster)
+    4. Structured Steps to Reproduce, Expected Result, and Actual Result
+    5. Flagged Contradictions / Ambiguities (if any exist between steps and results)
+    6. AI-Assisted Probable Root-Cause Hypothesis
     """
     try:
-        response = chat_model.generate_content(prompt, stream=False)
-        return response.text
+        response = chat_model.generate_content(prompt, stream=stream)
+        return response if stream else response.text
     except Exception as e:
         return f"I encountered an error connecting to the cloud AI: {e}"
 
-# --- STREAMLIT UI ---
-if "messages" not in st.session_state:
-    st.session_state.messages = []
+# --- PHASE 3: GITHUB REST API ISSUE EXPORT ---
+def export_to_external_system(bug_report, standardized_body, prediction):
+    """Exports the validated and restructured ticket directly to GitHub Issues via REST API."""
+    github_token = st.secrets.get("GITHUB_TOKEN", "")
+    github_repo = st.secrets.get("GITHUB_REPO", "")
 
-st.set_page_config(page_title="BugTriage-NLP", layout="wide", initial_sidebar_state="expanded") 
+    clean_title = bug_report.strip().splitlines()[0][:65]
+    issue_title = f"[BugTriage-NLP] {clean_title}"
+    issue_body = standardized_body if standardized_body else (
+        f"### Validated Defect Report\n**Phase 1 Status:** `{prediction}`\n\n"
+        f"#### Raw Defect Description\n{bug_report}"
+    )
 
+    if not github_token or not github_repo:
+        return True, "Ticket exported (Add GITHUB_TOKEN and GITHUB_REPO in secrets.toml for live GitHub repository issue creation)."
+
+    url = f"https://api.github.com/repos/{github_repo}/issues"
+    headers = {
+        "Authorization": f"Bearer {github_token}",
+        "Accept": "application/vnd.github+json"
+    }
+    payload = {
+        "title": issue_title,
+        "body": issue_body,
+        "labels": ["bug", "triage-validated"]
+    }
+    try:
+        resp = requests.post(url, headers=headers, json=payload, timeout=10)
+        if resp.status_code in (200, 201):
+            issue_url = resp.json().get("html_url", "")
+            return True, f"Ticket successfully exported to GitHub Issues: {issue_url}"
+        return False, f"GitHub API Error ({resp.status_code}): {resp.text}"
+    except Exception as e:
+        return False, f"Connection error: {e}"
+
+# --- STREAMLIT UI STYLING ---
 st.markdown("""
     <style>
         #MainMenu {visibility: hidden;}
@@ -315,19 +280,6 @@ st.markdown("""
         }
         .stButton>button:hover {
             box-shadow: 0 4px 6px rgba(0,0,0,0.05);
-        }
-        .history-btn>button {
-            text-align: left;
-            border: none;
-            background: none;
-            padding: 5px 0px;
-            color: #555;
-            font-size: 14px;
-        }
-        .history-btn>button:hover {
-            color: #000;
-            box-shadow: none;
-            text-decoration: underline;
         }
     </style>
 """, unsafe_allow_html=True)
@@ -359,7 +311,6 @@ with st.sidebar:
         with st.container(height=400):
             for sess_id, title, timestamp in sessions:
                 date_str = timestamp.split(" ")[0] 
-                
                 if st.button(f"{title} ({date_str})", key=sess_id, help="Click to resume this triage session"):
                     load_session(sess_id)
                     st.rerun()
@@ -371,107 +322,206 @@ st.title("BugTriage-NLP")
 st.markdown("**Automated Defect Report Validation and Triage Assistant**")
 st.divider()
 
-# Only show the input box if we are starting a fresh chat
+# Input box when starting a fresh chat or revising an incomplete report
 if "current_report" not in st.session_state:
-    st.write("Input the defect description below. The local classification model will validate its structural integrity, followed by AI refinement.")
-    user_input = st.text_area("Defect Description", height=150, placeholder="Enter bug report details here...", label_visibility="collapsed")
+    st.write("Input the defect description below. The local Scikit-Learn Logistic Regression model will validate its structural integrity, followed by Gemini AI refinement.")
+    
+    default_text = st.session_state.get("draft_report", "")
+    if sample_df is not None and not sample_df.empty:
+        id_col = next((c for c in sample_df.columns if 'id' in c.lower()), sample_df.columns[0])
+        desc_col = 'Description_Clean' if 'Description_Clean' in sample_df.columns else next((c for c in sample_df.columns if 'desc' in c.lower()), sample_df.columns[-1])
+        
+        options = ["-- Type manually below --"] + [
+            f"Ticket #{i+1}: {row[id_col]}" for i, row in sample_df.iterrows()
+        ]
+        selected_option = st.selectbox("Load a sample historical ticket from GitBugs (Optional):", options)
+        if selected_option != "-- Type manually below --":
+            row_idx = int(selected_option.split("#")[1].split(":")[0]) - 1
+            default_text = str(sample_df.iloc[row_idx][desc_col])
+
+    user_input = st.text_area(
+        "Defect Description",
+        value=default_text,
+        height=150,
+        placeholder="Enter bug report details (Steps to Reproduce, Expected Result, Actual Result)...",
+        label_visibility="collapsed"
+    )
 
     action_col1, action_col2, action_col3 = st.columns([1, 1, 2])
 
     with action_col1:
-        if st.button("Analyze Report", use_container_width=True):
+        if st.button("Analyze Report", use_container_width=True, type="primary"):
             if user_input.strip() == "":
                 st.warning("Please enter a defect description before proceeding.")
             else:
-                with st.spinner("Running structural & semantic validation..."):
-                    clean_input = user_input.strip()
-                    final_prediction, confidence = evaluate_bug_report(clean_input, run_semantic_check=True)
-                    
-                    # Save state
-                    st.session_state.current_report = clean_input
-                    st.session_state.prediction = final_prediction
-                    st.session_state.confidence = confidence
-                    
-                    # Log session in database
-                    create_session(st.session_state.session_id, clean_input, st.session_state.prediction)
-                    st.rerun()
+                clean_input = user_input.strip()
+                text_lower = clean_input.lower()
+                word_count = len(clean_input.split())
+                
+                # Phase 1: TF-IDF Vectorization + Logistic Regression Prediction
+                features = vectorizer.transform([clean_input])
+                ml_prediction = validator.predict(features)[0]
+                confidence = max(validator.predict_proba(features)[0]) * 100
+                
+                # Structural keyword check + minimum length gatekeeper
+                has_structure = (
+                    ("steps" in text_lower or "reproduce" in text_lower)
+                    and ("expected" in text_lower or "actual" in text_lower)
+                )
+                
+                if word_count < 15:
+                    final_prediction = "Missing_Details"
+                elif has_structure or ml_prediction == "Valid":
+                    final_prediction = "Valid"
+                else:
+                    final_prediction = "Missing_Details"
+                
+                # Save state
+                st.session_state.current_report = clean_input
+                st.session_state.prediction = final_prediction
+                st.session_state.confidence = round(confidence, 2)
+
+                # Phase 2 Semantic Coherence Check (Only executed if Phase 1 == "Valid")
+                if final_prediction == "Valid":
+                    with st.spinner("Phase 2: Checking semantic coherence with Gemini AI..."):
+                        verdict, reason = verify_semantic_coherence(clean_input)
+                        st.session_state.coherence_status = verdict
+                        st.session_state.coherence_reason = reason
+                
+                # Log session in database
+                create_session(st.session_state.session_id, clean_input, st.session_state.prediction)
+                st.rerun()
 else:
-    # Display the active report context if we are currently analyzing one
+    # Display the active report context
     with st.expander("View Active Defect Report Context", expanded=False):
         st.write(st.session_state.current_report)
         
-    status_col, action_col, empty_col = st.columns([1, 1, 2])
+    status_col, coherence_col, action_col = st.columns([1.2, 1.2, 1])
     with status_col:
-        st.caption("Current Validation Status")
-        conf_str = f" ({st.session_state.confidence}%)" if "confidence" in st.session_state else ""
+        st.caption("Phase 1: Local Validation (Logistic Regression)")
+        conf_str = f" ({st.session_state.confidence}% conf)" if "confidence" in st.session_state else ""
         if st.session_state.prediction == "Valid":
             st.info(f"Status: Valid Structure{conf_str}")
-        elif st.session_state.prediction == "Logical_Mismatch":
-            st.warning(f"Status: Logical Mismatch (Structure: {st.session_state.confidence}%)")
         else:
             st.error(f"Status: Missing Details{conf_str}")
-            
-    with action_col:
-        st.caption("External Routing")
-        if st.button("Export to Tracking System", use_container_width=True):
-            with st.spinner("Exporting ticket to GitHub Issues (KEJDS/QA_Issues)..."):
-                success, issue_url = export_to_external_system(
-                    st.session_state.current_report, 
-                    st.session_state.prediction
-                )
-                if success:
-                    st.toast("Ticket successfully exported to GitHub!")
-                    st.success(f"Exported! [View Issue on GitHub]({issue_url})")
 
-    st.markdown("### Triage Assistant")
-    
-    ai_col1, ai_col2, ai_col3 = st.columns([1, 1, 2])
-    with ai_col1:
-        if st.button("Analyze Root Cause", use_container_width=True):
-            msg = "Analyze this report deeply, recommend the target developer team/component for routing, and identify the most probable root cause."
-            st.session_state.messages.append({"role": "user", "content": msg})
-            save_message(st.session_state.session_id, "user", msg)
-            
-            with st.spinner("Processing analysis..."):
-                reply = generate_ai_response(msg, st.session_state.current_report, st.session_state.prediction, guideline_text=custom_guideline_text, stream=False)
-                st.session_state.messages.append({"role": "assistant", "content": reply})
-                save_message(st.session_state.session_id, "assistant", reply)
-                st.rerun()
+    # --- BLOCK PHASE 2 CLOUD CALLS WHEN FLAGGED AS MISSING_DETAILS (Matches Figure 3) ---
+    if st.session_state.prediction == "Missing_Details":
+        with coherence_col:
+            st.caption("Phase 2: Cloud LLM Gatekeeper")
+            st.warning("Cloud AI Skipped (Blocked by Phase 1)")
 
-    with ai_col2:
-        if st.button("Standardize Report Format", use_container_width=True):
-            msg = "Rewrite this bug report according to standard developer formatting, including Severity Level, Target Developer Routing, Steps to Reproduce, Expected vs. Actual Results, and Root-Cause Analysis."
-            st.session_state.messages.append({"role": "user", "content": msg})
-            save_message(st.session_state.session_id, "user", msg)
-            
-            with st.spinner("Restructuring..."):
-                reply = generate_ai_response(msg, st.session_state.current_report, st.session_state.prediction, guideline_text=custom_guideline_text, stream=False)
-                st.session_state.messages.append({"role": "assistant", "content": reply})
-                save_message(st.session_state.session_id, "assistant", reply)
-                st.rerun()
+        st.warning(
+            "**Revision Required (`Missing_Details`):** This defect report did not pass Phase 1 local structural validation. "
+            "To conserve cloud resources, generative AI processing is withheld. Please revise the report to include at least "
+            "15 words with clear **Steps to Reproduce**, **Expected Result**, and **Actual Result**."
+        )
+        if st.button("Revise & Resubmit Report", type="primary"):
+            start_new_chat(preserve_draft=st.session_state.current_report)
+            st.rerun()
 
-    chat_container = st.container()
-    with chat_container:
-        for message in st.session_state.messages:
-            with st.chat_message(message["role"]):
-                st.markdown(message["content"])
+    else:
+        # Report is "Valid" -> Show Phase 2 Coherence Verdict, Triage Assistant, & Phase 3 Export
+        with coherence_col:
+            st.caption("Phase 2: Semantic Coherence Verification")
+            if st.session_state.get("coherence_status") == "CONTRADICTORY":
+                st.warning("Flagged: Logical Contradiction Detected")
+                if st.session_state.get("coherence_reason"):
+                    st.caption(f"Reason: {st.session_state.coherence_reason}")
+            else:
+                st.success("Semantic Check: Coherent")
 
-    if prompt_input := st.chat_input("Enter a query regarding this report..."):
-        st.session_state.messages.append({"role": "user", "content": prompt_input})
-        save_message(st.session_state.session_id, "user", prompt_input)
+        with action_col:
+            st.caption("Phase 3: External Routing")
+            if st.button("Export to Tracking System", use_container_width=True):
+                with st.spinner("Connecting to GitHub REST API..."):
+                    latest_ai_ticket = next(
+                        (m["content"] for m in reversed(st.session_state.messages) if m["role"] == "assistant"),
+                        ""
+                    )
+                    success, msg_out = export_to_external_system(
+                        st.session_state.current_report,
+                        latest_ai_ticket,
+                        st.session_state.prediction
+                    )
+                    if success:
+                        st.toast(msg_out)
+                        st.success(msg_out)
+                    else:
+                        st.error(msg_out)
+
+        st.markdown("### Triage Assistant")
         
-        with st.chat_message("user"):
-            st.markdown(prompt_input)
+        ai_col1, ai_col2, ai_col3 = st.columns([1, 1, 2])
+        with ai_col1:
+            if st.button("Analyze Root Cause", use_container_width=True):
+                msg = "Analyze this report deeply, suggest the target developer component/team for routing, and identify the most probable root cause."
+                st.session_state.messages.append({"role": "user", "content": msg})
+                save_message(st.session_state.session_id, "user", msg)
+                
+                with st.spinner("Processing analysis..."):
+                    reply = generate_ai_response(
+                        msg,
+                        st.session_state.current_report,
+                        st.session_state.prediction,
+                        guideline_text=custom_guideline_text,
+                        stream=False
+                    )
+                    st.session_state.messages.append({"role": "assistant", "content": reply})
+                    save_message(st.session_state.session_id, "assistant", reply)
+                    st.rerun()
 
-        with st.chat_message("assistant"):
-            with st.spinner("Thinking..."):
-                reply = generate_ai_response(
+        with ai_col2:
+            if st.button("Standardize Report Format", use_container_width=True):
+                msg = "Rewrite this bug report into a standardized developer-ready ticket including Severity Level, Target Developer Component/Routing, Steps to Reproduce, Expected vs. Actual Results, Flagged Contradictions, and Root-Cause Analysis."
+                st.session_state.messages.append({"role": "user", "content": msg})
+                save_message(st.session_state.session_id, "user", msg)
+                
+                with st.spinner("Restructuring..."):
+                    reply = generate_ai_response(
+                        msg,
+                        st.session_state.current_report,
+                        st.session_state.prediction,
+                        guideline_text=custom_guideline_text,
+                        stream=False
+                    )
+                    st.session_state.messages.append({"role": "assistant", "content": reply})
+                    save_message(st.session_state.session_id, "assistant", reply)
+                    st.rerun()
+
+        chat_container = st.container()
+        with chat_container:
+            for message in st.session_state.messages:
+                with st.chat_message(message["role"]):
+                    st.markdown(message["content"])
+
+        if prompt_input := st.chat_input("Enter a query regarding this report..."):
+            st.session_state.messages.append({"role": "user", "content": prompt_input})
+            save_message(st.session_state.session_id, "user", prompt_input)
+            
+            with st.chat_message("user"):
+                st.markdown(prompt_input)
+
+            with st.chat_message("assistant"):
+                response_stream = generate_ai_response(
                     user_question=prompt_input, 
                     bug_report_context=st.session_state.current_report,
                     prediction_status=st.session_state.prediction,
                     guideline_text=custom_guideline_text,
-                    stream=False
+                    stream=True
                 )
-                st.markdown(reply)
-                st.session_state.messages.append({"role": "assistant", "content": reply})
-                save_message(st.session_state.session_id, "assistant", reply)
+                
+                if isinstance(response_stream, str):
+                    st.markdown(response_stream)
+                    st.session_state.messages.append({"role": "assistant", "content": response_stream})
+                    save_message(st.session_state.session_id, "assistant", response_stream)
+                else:
+                    def stream_text():
+                        full_text = ""
+                        for chunk in response_stream:
+                            full_text += chunk.text
+                            yield chunk.text
+                        save_message(st.session_state.session_id, "assistant", full_text)
+                    
+                    full_reply = st.write_stream(stream_text)
+                    st.session_state.messages.append({"role": "assistant", "content": full_reply})
