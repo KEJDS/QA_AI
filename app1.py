@@ -7,6 +7,7 @@ import requests
 from datetime import datetime
 import sqlite3
 import uuid
+import glob
 
 # --- IMPORTS FOR FILE PARSING ---
 import PyPDF2
@@ -14,10 +15,19 @@ import docx
 
 # --- BASE DIRECTORY (Works locally and on GitHub/Streamlit Cloud) ---
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+
+def find_project_file(filename):
+    """Searches BASE_DIR and all subfolders for the target file."""
+    direct_path = os.path.join(BASE_DIR, filename)
+    if os.path.exists(direct_path):
+        return direct_path
+    matches = glob.glob(os.path.join(BASE_DIR, "**", filename), recursive=True)
+    return matches[0] if matches else direct_path
+
 DB_PATH = os.path.join(BASE_DIR, "chat_logs.db")
-VEC_PATH = os.path.join(BASE_DIR, "tfidf_vectorizer.pkl")
-CLF_PATH = os.path.join(BASE_DIR, "logistic_regression_validator.pkl")
-SAMPLE_CSV_PATH = os.path.join(BASE_DIR, "spark_sample_30.csv")
+VEC_PATH = find_project_file("tfidf_vectorizer.pkl")
+CLF_PATH = find_project_file("logistic_regression_validator.pkl")
+SAMPLE_CSV_PATH = find_project_file("spark_sample_30.csv")
 
 # --- PAGE CONFIG ---
 st.set_page_config(page_title="BugTriage-NLP", layout="wide", initial_sidebar_state="expanded")
