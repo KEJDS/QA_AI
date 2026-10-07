@@ -250,8 +250,10 @@ def extract_text_from_file(file_bytes: bytes, file_name: str):
 def verify_semantic_coherence(bug_report: str, max_retries=3):
     """Fast, token-capped check for logical alignment between Steps and Results with auto-retry."""
     prompt = (
+       prompt = (
         "Check if this bug report has a severe logical contradiction between the Steps to Reproduce "
-        "and the Expected/Actual Results.\n\n"
+        "and the Expected/Actual Results, OR if it contains nonsensical/irrelevant statements "
+        "(e.g., mentioning weather, food, or impossible events).\n\n"
         f"Bug Report:\n\"\"\"{bug_report}\"\"\"\n\n"
         "Respond in EXACTLY two lines:\n"
         "VERDICT: [COHERENT or CONTRADICTORY]\n"
