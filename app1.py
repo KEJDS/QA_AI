@@ -37,6 +37,7 @@ st.set_page_config(page_title="BugTriage-NLP", layout="wide", initial_sidebar_st
 genai.configure(api_key=st.secrets["GOOGLE_API_KEY"])
 
 @st.cache_resource
+@st.cache_resource
 def load_chat_model():
     """Dynamically finds the best available Gemini model for your specific API key."""
     # 1. Ask Google what models your key has permission to use
@@ -45,9 +46,9 @@ def load_chat_model():
         if 'generateContent' in m.supported_generation_methods
     ]
     
-    # 2. Priority list: Try 1.5-flash, fall back to older/alternative versions if blocked
+    # 2. Priority list: Target 3.8 Flash based on your dashboard limits
     target_model = None
-    for preferred in ["models/gemini-3.8-flash", "models/gemini-1.5-flash-latest", "models/gemini-1.0-pro", "models/gemini-pro"]:
+    for preferred in ["models/gemini-3.8-flash", "models/gemini-3.8-flash-latest", "gemini-3.8-flash"]:
         if preferred in available_models:
             target_model = preferred
             break
@@ -59,6 +60,11 @@ def load_chat_model():
     system_instruction = (
         "You are an expert Software Quality Assurance Engineer and Triage Specialist. "
         "Provide direct, concise, developer-ready outputs without conversational filler."
+    )
+    
+    return genai.GenerativeModel(
+        model_name=target_model,
+        system_instruction=system_instruction
     )
     
     return genai.GenerativeModel(
