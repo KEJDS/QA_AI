@@ -38,14 +38,31 @@ genai.configure(api_key=st.secrets["GOOGLE_API_KEY"])
 
 @st.cache_resource
 def load_chat_model():
-    # Safest, most explicit endpoint name for Streamlit Cloud
-    model_name = st.secrets.get("GEMINI_MODEL", "models/gemini-1.5-flash")
+    """Dynamically finds the best available Gemini model for your specific API key."""
+    # 1. Ask Google what models your key has permission to use
+    available_models = [
+        m.name for m in genai.list_models() 
+        if 'generateContent' in m.supported_generation_methods
+    ]
+    
+    # 2. Priority list: Try 1.5-flash, fall back to older/alternative versions if blocked
+    target_model = None
+    for preferred in ["models/gemini-1.5-flash", "models/gemini-1.5-flash-latest", "models/gemini-1.0-pro", "models/gemini-pro"]:
+        if preferred in available_models:
+            target_model = preferred
+            break
+            
+    # 3. Ultimate fallback: Just grab the first available model if the preferences fail
+    if not target_model and available_models:
+        target_model = available_models[0]
+        
     system_instruction = (
         "You are an expert Software Quality Assurance Engineer and Triage Specialist. "
         "Provide direct, concise, developer-ready outputs without conversational filler."
     )
+    
     return genai.GenerativeModel(
-        model_name=model_name,
+        model_name=target_model,
         system_instruction=system_instruction
     )
 
