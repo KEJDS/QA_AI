@@ -38,7 +38,7 @@ genai.configure(api_key=st.secrets["GOOGLE_API_KEY"])
 @st.cache_resource
 def load_chat_model():
     # FIXED: Using a real Google endpoint so the API doesn't hang/timeout
-     model_name = st.secrets.get("GEMINI_MODEL", "gemini-3.8-flash")
+    model_name = st.secrets.get("GEMINI_MODEL", "gemini-3.8-flash")
     system_instruction = (
         "You are an expert Software Quality Assurance Engineer and Triage Specialist. "
         "Provide direct, concise, developer-ready outputs without conversational filler."
