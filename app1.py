@@ -259,7 +259,7 @@ def verify_semantic_coherence(bug_report: str, max_retries=3):
         "VERDICT: [COHERENT or CONTRADICTORY]\n"
         "REASON: [One short sentence]"
     )
-    
+    )
     for attempt in range(max_retries):
         try:
             res = chat_model.generate_content(
