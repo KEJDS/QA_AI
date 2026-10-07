@@ -1,13 +1,13 @@
 import os
 import glob
 import uuid
-import sqlite3
-from datetime import datetime
+from datetime import datetime, timezone
 import requests
 import joblib
 import pandas as pd
 import streamlit as st
 import google.generativeai as genai
+from pymongo import MongoClient
 
 # --- IMPORTS FOR FILE PARSING ---
 import PyPDF2
@@ -24,7 +24,6 @@ def find_project_file(filename):
     matches = glob.glob(os.path.join(BASE_DIR, "**", filename), recursive=True)
     return matches[0] if matches else direct_path
 
-DB_PATH = os.path.join(BASE_DIR, "chat_logs.db")
 VEC_PATH = find_project_file("tfidf_vectorizer.pkl")
 CLF_PATH = find_project_file("logistic_regression_validator.pkl")
 SAMPLE_CSV_PATH = find_project_file("spark_sample_30.csv")
@@ -37,7 +36,7 @@ genai.configure(api_key=st.secrets["GOOGLE_API_KEY"])
 
 @st.cache_resource
 def load_chat_model():
-    # Uses gemini-2.5-flash by default for high-speed, low-latency triage
+    # Uses gemini-3.8-flash (or falls back to configured secret)
     model_name = st.secrets.get("GEMINI_MODEL", "gemini-3.8-flash")
     system_instruction = (
         "You are an expert Software Quality Assurance Engineer and Triage Specialist. "
@@ -83,7 +82,6 @@ def evaluate_phase1_structure(report_text: str):
     proba = validator.predict_proba(features)[0]
     classes = list(validator.classes_)
 
-    # Explicitly get probability of the "Valid" class (so <50% actually shows <50%!)
     if "Valid" in classes:
         valid_idx = classes.index("Valid")
     elif 1 in classes:
@@ -99,9 +97,6 @@ def evaluate_phase1_structure(report_text: str):
         and ("expected" in text_lower or "actual" in text_lower)
     )
 
-    # Gatekeeper Threshold:
-    # Must be at least 15 words AND score >= 50.0% Valid probability
-    # (Or score >= 40.0% if explicit structural headers are present)
     if word_count < 15:
         final_prediction = "Missing_Details"
     elif valid_conf >= 50.0 or (has_structure and valid_conf >= 40.0):
@@ -111,98 +106,77 @@ def evaluate_phase1_structure(report_text: str):
 
     return final_prediction, valid_conf
 
-# --- DATABASE SETUP & SESSION MANAGEMENT (SQLite Persistence) ---
-def init_db():
-    """Initializes SQLite tables and migrates schema to persist confidence & coherence."""
-    conn = sqlite3.connect(DB_PATH)
-    cursor = conn.cursor()
+# --- DATABASE SETUP & SESSION MANAGEMENT (MongoDB Persistence) ---
+@st.cache_resource
+def init_mongo():
+    """Connects to MongoDB and sets up collections/indexes."""
+    try:
+        mongo_uri = st.secrets["MONGO_URI"]
+        client = MongoClient(mongo_uri, serverSelectionTimeoutMS=5000)
+        # Verify connection
+        client.admin.command('ping')
+        db = client["bugtriage_nlp_db"]
+        
+        # Create indexes to speed up sorting and querying
+        db.sessions.create_index("session_id", unique=True)
+        db.sessions.create_index([("timestamp", -1)])
+        db.chat_history.create_index("session_id")
+        db.chat_history.create_index([("timestamp", 1)])
+        return db
+    except Exception as e:
+        st.sidebar.error(f"Failed to connect to MongoDB: {e}")
+        return None
 
-    cursor.execute('''
-        CREATE TABLE IF NOT EXISTS Sessions (
-            session_id TEXT PRIMARY KEY,
-            title TEXT,
-            bug_report TEXT,
-            prediction TEXT,
-            confidence REAL,
-            coherence_status TEXT,
-            coherence_reason TEXT,
-            timestamp DATETIME DEFAULT CURRENT_TIMESTAMP
-        )
-    ''')
-
-    # Auto-migrate existing DB if columns were missing in older versions
-    cursor.execute("PRAGMA table_info(Sessions)")
-    existing_cols = [col[1] for col in cursor.fetchall()]
-    if "confidence" not in existing_cols:
-        cursor.execute("ALTER TABLE Sessions ADD COLUMN confidence REAL")
-    if "coherence_status" not in existing_cols:
-        cursor.execute("ALTER TABLE Sessions ADD COLUMN coherence_status TEXT DEFAULT 'COHERENT'")
-    if "coherence_reason" not in existing_cols:
-        cursor.execute("ALTER TABLE Sessions ADD COLUMN coherence_reason TEXT DEFAULT ''")
-
-    cursor.execute('''
-        CREATE TABLE IF NOT EXISTS ChatHistory (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            session_id TEXT,
-            role TEXT,
-            content TEXT,
-            timestamp DATETIME DEFAULT CURRENT_TIMESTAMP
-        )
-    ''')
-    conn.commit()
-    conn.close()
+db = init_mongo()
 
 def create_session(session_id, bug_report, prediction, confidence, coherence_status="COHERENT", coherence_reason=""):
-    """Creates or updates a session record with all Phase 1 & Phase 2 metrics."""
+    """Creates or updates a session document in MongoDB."""
+    if db is None: return
     clean_text = bug_report.replace('\n', ' ').strip()
     title = clean_text[:35] + "..." if len(clean_text) > 35 else clean_text
 
-    conn = sqlite3.connect(DB_PATH)
-    cursor = conn.cursor()
-    cursor.execute(
-        """INSERT OR REPLACE INTO Sessions 
-           (session_id, title, bug_report, prediction, confidence, coherence_status, coherence_reason) 
-           VALUES (?, ?, ?, ?, ?, ?, ?)""",
-        (session_id, title, bug_report, prediction, confidence, coherence_status, coherence_reason)
-    )
-    conn.commit()
-    conn.close()
+    doc = {
+        "session_id": session_id,
+        "title": title,
+        "bug_report": bug_report,
+        "prediction": prediction,
+        "confidence": confidence,
+        "coherence_status": coherence_status,
+        "coherence_reason": coherence_reason,
+        "timestamp": datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S")
+    }
+    db.sessions.update_one({"session_id": session_id}, {"$set": doc}, upsert=True)
 
 def save_message(session_id, role, content):
-    """Saves a single chat message to the database."""
-    conn = sqlite3.connect(DB_PATH)
-    cursor = conn.cursor()
-    cursor.execute(
-        "INSERT INTO ChatHistory (session_id, role, content) VALUES (?, ?, ?)",
-        (session_id, role, content)
-    )
-    conn.commit()
-    conn.close()
+    """Saves a single chat message document to MongoDB."""
+    if db is None: return
+    doc = {
+        "session_id": session_id,
+        "role": role,
+        "content": content,
+        "timestamp": datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S")
+    }
+    db.chat_history.insert_one(doc)
 
 def get_all_sessions():
     """Retrieves all sessions for the sidebar history."""
-    conn = sqlite3.connect(DB_PATH)
-    cursor = conn.cursor()
-    cursor.execute("SELECT session_id, title, timestamp FROM Sessions ORDER BY timestamp DESC")
-    records = cursor.fetchall()
-    conn.close()
-    return records
+    if db is None: return []
+    cursor = db.sessions.find({}, {"session_id": 1, "title": 1, "timestamp": 1, "_id": 0}).sort("timestamp", -1)
+    return [(doc["session_id"], doc["title"], doc["timestamp"]) for doc in cursor]
 
 def load_session(session_id):
-    """Loads a previous session's exact metrics and messages into session_state."""
-    conn = sqlite3.connect(DB_PATH)
-    cursor = conn.cursor()
-
-    cursor.execute(
-        "SELECT bug_report, prediction, confidence, coherence_status, coherence_reason FROM Sessions WHERE session_id = ?",
-        (session_id,)
-    )
-    session_data = cursor.fetchone()
+    """Loads a previous session's exact metrics and messages from MongoDB into session_state."""
+    if db is None: return
+    session_data = db.sessions.find_one({"session_id": session_id})
 
     if session_data:
-        bug_report, saved_pred, saved_conf, coh_status, coh_reason = session_data
+        bug_report = session_data.get("bug_report", "")
+        saved_pred = session_data.get("prediction", "")
+        saved_conf = session_data.get("confidence")
+        coh_status = session_data.get("coherence_status", "COHERENT")
+        coh_reason = session_data.get("coherence_reason", "")
 
-        # If loading an older session saved before the DB migration, recalculate locally in <2ms
+        # Recalculate if loading an older session saved without confidence score
         if saved_conf is None:
             recalc_pred, recalc_conf = evaluate_phase1_structure(bug_report)
             saved_conf = recalc_conf
@@ -212,14 +186,11 @@ def load_session(session_id):
         st.session_state.current_report = bug_report
         st.session_state.prediction = saved_pred
         st.session_state.confidence = round(float(saved_conf), 2)
-        st.session_state.coherence_status = coh_status or "COHERENT"
-        st.session_state.coherence_reason = coh_reason or ""
+        st.session_state.coherence_status = coh_status
+        st.session_state.coherence_reason = coh_reason
 
-        cursor.execute("SELECT role, content FROM ChatHistory WHERE session_id = ? ORDER BY id ASC", (session_id,))
-        messages = cursor.fetchall()
-        st.session_state.messages = [{"role": row[0], "content": row[1]} for row in messages]
-
-    conn.close()
+        messages_cursor = db.chat_history.find({"session_id": session_id}).sort("timestamp", 1)
+        st.session_state.messages = [{"role": msg["role"], "content": msg["content"]} for msg in messages_cursor]
 
 def start_new_chat(preserve_draft=""):
     """Resets the application state for a new or revised bug report."""
@@ -230,10 +201,7 @@ def start_new_chat(preserve_draft=""):
         if key in st.session_state:
             del st.session_state[key]
 
-# Initialize database on app startup
-init_db()
-
-# Session tracking
+# Session tracking Initialization
 if "session_id" not in st.session_state:
     st.session_state.session_id = str(uuid.uuid4())
 if "messages" not in st.session_state:
@@ -462,7 +430,7 @@ if "current_report" not in st.session_state:
                         st.session_state.coherence_status = verdict
                         st.session_state.coherence_reason = reason
 
-                # Log full session metrics in SQLite so Chat History restores exact percentages
+                # Log full session metrics in MongoDB
                 create_session(
                     st.session_state.session_id,
                     clean_input,
@@ -495,7 +463,7 @@ else:
 
         st.warning(
             f"**Revision Required (`Missing_Details` — {conf_val:.2f}% Valid Score):** This defect report scored below the "
-            "50% structural validity threshold. To conserve cloud resources, generative AI processing is withheld. "
+            "structural validity threshold. To conserve cloud resources, generative AI processing is withheld. "
             "Please revise the report to include at least 15 words with clear **Steps to Reproduce**, **Expected Result**, and **Actual Result**."
         )
         if st.button("Revise & Resubmit Report", type="primary"):
