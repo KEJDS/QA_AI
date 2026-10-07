@@ -254,16 +254,22 @@ def extract_text_from_file(file_bytes: bytes, file_name: str):
 
 # --- PHASE 2: FAST SEMANTIC COHERENCE VERIFICATION (WITH RETRIES) ---
 # --- PHASE 2: FAST SEMANTIC COHERENCE VERIFICATION (WITH RETRIES) ---
+# --- PHASE 2: FAST SEMANTIC COHERENCE VERIFICATION (WITH RETRIES) ---
 def verify_semantic_coherence(bug_report: str, max_retries=3):
     """Fast, token-capped check for logical alignment between Steps and Results with auto-retry."""
     prompt = (
-        "Check if this bug report has a severe logical contradiction between the Steps to Reproduce "
-        "and the Expected/Actual Results, OR if it contains nonsensical/irrelevant statements "
-        "(e.g., mentioning weather, food, or impossible events).\n\n"
+        "You are a STRICT and UNFORGIVING Quality Assurance Gatekeeper. "
+        "Analyze the following bug report. You must reject it by returning 'VERDICT: CONTRADICTORY' "
+        "if you detect ANY of the following:\n"
+        "1. Logical contradictions between steps and results.\n"
+        "2. ANY nonsensical, surreal, or completely irrelevant sentences injected into the text "
+        "(e.g., 'the sun goes blue', 'I baked a cake', 'dogs are barking').\n"
+        "CRITICAL RULE: Even if 99% of the report contains valid, highly technical code, "
+        "the presence of ONE irrelevant or surreal sentence MUST trigger a CONTRADICTORY verdict.\n\n"
         f"Bug Report:\n\"\"\"{bug_report}\"\"\"\n\n"
         "Respond in EXACTLY two lines:\n"
         "VERDICT: [COHERENT or CONTRADICTORY]\n"
-        "REASON: [One short sentence]"
+        "REASON: [One short sentence explaining the contradiction or quoting the nonsense]"
     )
     
     for attempt in range(max_retries):
