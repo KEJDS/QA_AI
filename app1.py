@@ -247,10 +247,10 @@ def extract_text_from_file(file_bytes: bytes, file_name: str):
     return extracted_text
 
 # --- PHASE 2: FAST SEMANTIC COHERENCE VERIFICATION (WITH RETRIES) ---
+# --- PHASE 2: FAST SEMANTIC COHERENCE VERIFICATION (WITH RETRIES) ---
 def verify_semantic_coherence(bug_report: str, max_retries=3):
     """Fast, token-capped check for logical alignment between Steps and Results with auto-retry."""
     prompt = (
-       prompt = (
         "Check if this bug report has a severe logical contradiction between the Steps to Reproduce "
         "and the Expected/Actual Results, OR if it contains nonsensical/irrelevant statements "
         "(e.g., mentioning weather, food, or impossible events).\n\n"
@@ -259,7 +259,7 @@ def verify_semantic_coherence(bug_report: str, max_retries=3):
         "VERDICT: [COHERENT or CONTRADICTORY]\n"
         "REASON: [One short sentence]"
     )
-    )
+    
     for attempt in range(max_retries):
         try:
             res = chat_model.generate_content(
