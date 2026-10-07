@@ -47,7 +47,7 @@ def load_chat_model():
     
     # 2. Priority list: Try 1.5-flash, fall back to older/alternative versions if blocked
     target_model = None
-    for preferred in ["models/gemini-1.5-flash", "models/gemini-1.5-flash-latest", "models/gemini-1.0-pro", "models/gemini-pro"]:
+    for preferred in ["models/gemini-3.8-flash", "models/gemini-1.5-flash-latest", "models/gemini-1.0-pro", "models/gemini-pro"]:
         if preferred in available_models:
             target_model = preferred
             break
