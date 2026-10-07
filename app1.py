@@ -37,8 +37,8 @@ genai.configure(api_key=st.secrets["GOOGLE_API_KEY"])
 
 @st.cache_resource
 def load_chat_model():
-    # Uses gemini-3.8-flash (or falls back to configured secret)
-    model_name = st.secrets.get("GEMINI_MODEL", "gemini-3.8-flash")
+    # FIXED: Using a real Google endpoint so the API doesn't hang/timeout
+    model_name = st.secrets.get("GEMINI_MODEL", "gemini-1.5-flash")
     system_instruction = (
         "You are an expert Software Quality Assurance Engineer and Triage Specialist. "
         "Provide direct, concise, developer-ready outputs without conversational filler."
@@ -108,21 +108,16 @@ def evaluate_phase1_structure(report_text: str):
     return final_prediction, valid_conf
 
 # --- DATABASE SETUP & SESSION MANAGEMENT (MongoDB Persistence) ---
-import certifi
-
 @st.cache_resource
 def init_mongo():
     """Connects to MongoDB and sets up collections/indexes."""
     try:
         mongo_uri = st.secrets["MONGO_URI"]
-        # Pass certifi.where() to handle TLS/SSL certificate verification
+        # Included certifi to prevent TLSV1_ALERT_INTERNAL_ERROR on Streamlit Cloud
         client = MongoClient(mongo_uri, serverSelectionTimeoutMS=5000, tlsCAFile=certifi.where())
-        
-        # Verify connection
         client.admin.command('ping')
         db = client["bugtriage_nlp_db"]
         
-        # Create indexes to speed up sorting and querying
         db.sessions.create_index("session_id", unique=True)
         db.sessions.create_index([("timestamp", -1)])
         db.chat_history.create_index("session_id")
@@ -181,7 +176,6 @@ def load_session(session_id):
         coh_status = session_data.get("coherence_status", "COHERENT")
         coh_reason = session_data.get("coherence_reason", "")
 
-        # Recalculate if loading an older session saved without confidence score
         if saved_conf is None:
             recalc_pred, recalc_conf = evaluate_phase1_structure(bug_report)
             saved_conf = recalc_conf
@@ -419,23 +413,17 @@ if "current_report" not in st.session_state:
             else:
                 clean_input = user_input.strip()
 
-                # Phase 1: Local TF-IDF + Logistic Regression Evaluation
+                # Phase 1: Local TF-IDF + Logistic Regression Evaluation (INSTANT!)
                 final_prediction, valid_conf = evaluate_phase1_structure(clean_input)
 
                 st.session_state.current_report = clean_input
                 st.session_state.prediction = final_prediction
                 st.session_state.confidence = valid_conf
-                st.session_state.coherence_status = "SKIPPED"
+                
+                # Defer the Gemini call so Phase 1 is lightning-fast
+                st.session_state.coherence_status = "PENDING"
                 st.session_state.coherence_reason = ""
 
-                # Phase 2 Semantic Coherence Check (Only executed if Phase 1 == "Valid")
-                if final_prediction == "Valid":
-                    with st.spinner("Phase 2: Checking semantic coherence..."):
-                        verdict, reason = verify_semantic_coherence(clean_input)
-                        st.session_state.coherence_status = verdict
-                        st.session_state.coherence_reason = reason
-
-                # Log full session metrics in MongoDB
                 create_session(
                     st.session_state.session_id,
                     clean_input,
@@ -456,7 +444,7 @@ else:
         conf_val = st.session_state.get("confidence", 0.0)
         conf_str = f" ({conf_val:.2f}% conf)"
         if st.session_state.prediction == "Valid":
-            st.info(f"Status: Valid Structure{conf_str}")
+            st.success(f"Status: Valid Structure{conf_str}")
         else:
             st.error(f"Status: Missing Details{conf_str}")
 
@@ -476,10 +464,28 @@ else:
             st.rerun()
 
     else:
-        # Report is "Valid" -> Show Phase 2 Coherence Verdict, Triage Assistant, & Phase 3 Export
+        # Report is "Valid" -> Show Manual Trigger for Phase 2, Triage Assistant, & Phase 3 Export
         with coherence_col:
             st.caption("Phase 2: Semantic Coherence Verification")
-            if st.session_state.get("coherence_status") == "CONTRADICTORY":
+            if st.session_state.get("coherence_status") == "PENDING":
+                st.info("Awaiting Cloud Verification")
+                # NEW: Panelists can see exactly when the cloud is called!
+                if st.button("Run Coherence Check", type="secondary", use_container_width=True):
+                    with st.spinner("Checking with Gemini..."):
+                        verdict, reason = verify_semantic_coherence(st.session_state.current_report)
+                        st.session_state.coherence_status = verdict
+                        st.session_state.coherence_reason = reason
+                        
+                        create_session(
+                            st.session_state.session_id,
+                            st.session_state.current_report,
+                            st.session_state.prediction,
+                            st.session_state.confidence,
+                            st.session_state.coherence_status,
+                            st.session_state.coherence_reason
+                        )
+                        st.rerun()
+            elif st.session_state.get("coherence_status") == "CONTRADICTORY":
                 st.warning("Flagged: Logical Contradiction Detected")
                 if st.session_state.get("coherence_reason"):
                     st.caption(f"Reason: {st.session_state.coherence_reason}")
@@ -507,7 +513,7 @@ else:
 
         st.markdown("### Triage Assistant")
 
-        # Quick-action buttons now trigger instant streaming instead of blocking spinners
+        # Quick-action buttons trigger instant streaming instead of blocking spinners
         ai_col1, ai_col2, ai_col3 = st.columns([1, 1, 2])
         triggered_prompt = None
 
