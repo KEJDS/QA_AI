@@ -1,6 +1,7 @@
 import os
 import glob
 import uuid
+import time
 from datetime import datetime, timezone
 import requests
 import joblib
@@ -37,7 +38,7 @@ genai.configure(api_key=st.secrets["GOOGLE_API_KEY"])
 
 @st.cache_resource
 def load_chat_model():
-    # FIXED: Using a real Google endpoint so the API doesn't hang/timeout
+    # Use gemini-1.5-flash for lightning-fast speeds and to prevent timeouts
     model_name = st.secrets.get("GEMINI_MODEL", "gemini-3.8-flash")
     system_instruction = (
         "You are an expert Software Quality Assurance Engineer and Triage Specialist. "
@@ -110,10 +111,9 @@ def evaluate_phase1_structure(report_text: str):
 # --- DATABASE SETUP & SESSION MANAGEMENT (MongoDB Persistence) ---
 @st.cache_resource
 def init_mongo():
-    """Connects to MongoDB and sets up collections/indexes."""
+    """Connects to MongoDB Atlas."""
     try:
         mongo_uri = st.secrets["MONGO_URI"]
-        # Included certifi to prevent TLSV1_ALERT_INTERNAL_ERROR on Streamlit Cloud
         client = MongoClient(mongo_uri, serverSelectionTimeoutMS=5000, tlsCAFile=certifi.where())
         client.admin.command('ping')
         db = client["bugtriage_nlp_db"]
@@ -229,10 +229,9 @@ def extract_text_from_file(file_bytes: bytes, file_name: str):
         st.error(f"Error reading the file: {e}")
     return extracted_text
 
-# --- PHASE 2: FAST SEMANTIC COHERENCE VERIFICATION ---
-@st.cache_data(show_spinner=False)
-def verify_semantic_coherence(bug_report: str):
-    """Fast, token-capped check for logical alignment between Steps and Results."""
+# --- PHASE 2: FAST SEMANTIC COHERENCE VERIFICATION (WITH RETRIES) ---
+def verify_semantic_coherence(bug_report: str, max_retries=3):
+    """Fast, token-capped check for logical alignment between Steps and Results with auto-retry."""
     prompt = (
         "Check if this bug report has a severe logical contradiction between the Steps to Reproduce "
         "and the Expected/Actual Results.\n\n"
@@ -241,23 +240,27 @@ def verify_semantic_coherence(bug_report: str):
         "VERDICT: [COHERENT or CONTRADICTORY]\n"
         "REASON: [One short sentence]"
     )
-    try:
-        res = chat_model.generate_content(
-            prompt,
-            generation_config=genai.types.GenerationConfig(
-                temperature=0.0,
-                max_output_tokens=60
-            )
-        ).text.strip()
-        lines = [line.strip() for line in res.splitlines() if line.strip()]
-        verdict = "CONTRADICTORY" if lines and "CONTRADICTORY" in lines[0].upper() else "COHERENT"
-        reason = lines[-1].replace("REASON:", "").strip() if len(lines) > 1 else ""
-        return verdict, reason
-    except Exception as e:
-        return "COHERENT", f"Coherence check bypassed ({e})"
+    
+    for attempt in range(max_retries):
+        try:
+            res = chat_model.generate_content(
+                prompt,
+                generation_config=genai.types.GenerationConfig(
+                    temperature=0.0,
+                    max_output_tokens=60
+                )
+            ).text.strip()
+            lines = [line.strip() for line in res.splitlines() if line.strip()]
+            verdict = "CONTRADICTORY" if lines and "CONTRADICTORY" in lines[0].upper() else "COHERENT"
+            reason = lines[-1].replace("REASON:", "").strip() if len(lines) > 1 else ""
+            return verdict, reason
+        except Exception as e:
+            if attempt == max_retries - 1:
+                return "COHERENT", f"Coherence check bypassed after {max_retries} retries ({e})"
+            time.sleep(2)
 
-# --- PHASE 2: OPTIMIZED GENERATIVE AI RESTRUCTURING & TRIAGE ---
-def generate_ai_response(user_question, bug_report_context, prediction_status, guideline_text="", stream=True):
+# --- PHASE 2: OPTIMIZED GENERATIVE AI RESTRUCTURING (WITH RETRIES) ---
+def generate_ai_response(user_question, bug_report_context, prediction_status, guideline_text="", stream=True, max_retries=3):
     if not bug_report_context or not bug_report_context.strip():
         return "I do not have a bug report to look at yet. Please analyze one first."
 
@@ -278,18 +281,22 @@ def generate_ai_response(user_question, bug_report_context, prediction_status, g
         "5. **Flagged Contradictions / Ambiguities**\n"
         "6. **Probable Root-Cause Hypothesis**"
     )
-    try:
-        response = chat_model.generate_content(
-            prompt,
-            stream=stream,
-            generation_config=genai.types.GenerationConfig(
-                temperature=0.2,
-                max_output_tokens=900
+    
+    for attempt in range(max_retries):
+        try:
+            response = chat_model.generate_content(
+                prompt,
+                stream=stream,
+                generation_config=genai.types.GenerationConfig(
+                    temperature=0.2,
+                    max_output_tokens=900
+                )
             )
-        )
-        return response if stream else response.text
-    except Exception as e:
-        return f"I encountered an error connecting to the cloud AI: {e}"
+            return response if stream else response.text
+        except Exception as e:
+            if attempt == max_retries - 1:
+                return f"I encountered an error connecting to the cloud AI after {max_retries} retries: {e}"
+            time.sleep(2)
 
 # --- PHASE 3: GITHUB REST API ISSUE EXPORT ---
 def export_to_external_system(bug_report, standardized_body, prediction):
@@ -469,9 +476,8 @@ else:
             st.caption("Phase 2: Semantic Coherence Verification")
             if st.session_state.get("coherence_status") == "PENDING":
                 st.info("Awaiting Cloud Verification")
-                # NEW: Panelists can see exactly when the cloud is called!
                 if st.button("Run Coherence Check", type="secondary", use_container_width=True):
-                    with st.spinner("Checking with Gemini..."):
+                    with st.spinner("Checking with Gemini (Will auto-retry if failed)..."):
                         verdict, reason = verify_semantic_coherence(st.session_state.current_report)
                         st.session_state.coherence_status = verdict
                         st.session_state.coherence_reason = reason
@@ -528,9 +534,24 @@ else:
         # Render existing conversation history
         chat_container = st.container()
         with chat_container:
-            for message in st.session_state.messages:
+            for idx, message in enumerate(st.session_state.messages):
                 with st.chat_message(message["role"]):
                     st.markdown(message["content"])
+                    
+                    # AUTO-EXPORT & COPY BUTTONS for Assistant Messages
+                    if message["role"] == "assistant":
+                        dl_col, copy_col, space = st.columns([2, 3, 5])
+                        with dl_col:
+                            st.download_button(
+                                label="📥 Export (.md)",
+                                data=message["content"],
+                                file_name=f"BugTriage_Report_{idx}.md",
+                                mime="text/markdown",
+                                key=f"dl_hist_{idx}"
+                            )
+                        with copy_col:
+                            with st.expander("📋 View/Copy Raw Code"):
+                                st.code(message["content"], language="markdown")
 
         # Handle either a quick-action button click or chat_input submission with live streaming
         chat_box_input = st.chat_input("Enter a query regarding this report...")
@@ -568,3 +589,6 @@ else:
 
                         full_reply = st.write_stream(stream_text)
                         st.session_state.messages.append({"role": "assistant", "content": full_reply})
+            
+            # Force rerun so the newly generated message gets the Export & Copy buttons
+            st.rerun()
