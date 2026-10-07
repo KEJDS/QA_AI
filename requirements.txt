@@ -2,7 +2,7 @@ streamlit
 joblib
 pandas
 scikit-learn
-google-generativeai
+google-generativeai>=0.8.2
 PyPDF2
 python-docx
 requests
