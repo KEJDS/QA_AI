@@ -8,6 +8,7 @@ import pandas as pd
 import streamlit as st
 import google.generativeai as genai
 from pymongo import MongoClient
+import certifi
 
 # --- IMPORTS FOR FILE PARSING ---
 import PyPDF2
@@ -107,12 +108,16 @@ def evaluate_phase1_structure(report_text: str):
     return final_prediction, valid_conf
 
 # --- DATABASE SETUP & SESSION MANAGEMENT (MongoDB Persistence) ---
+import certifi
+
 @st.cache_resource
 def init_mongo():
     """Connects to MongoDB and sets up collections/indexes."""
     try:
         mongo_uri = st.secrets["MONGO_URI"]
-        client = MongoClient(mongo_uri, serverSelectionTimeoutMS=5000)
+        # Pass certifi.where() to handle TLS/SSL certificate verification
+        client = MongoClient(mongo_uri, serverSelectionTimeoutMS=5000, tlsCAFile=certifi.where())
+        
         # Verify connection
         client.admin.command('ping')
         db = client["bugtriage_nlp_db"]
