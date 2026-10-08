@@ -256,20 +256,22 @@ def extract_text_from_file(file_bytes: bytes, file_name: str):
 # --- PHASE 2: FAST SEMANTIC COHERENCE VERIFICATION (WITH RETRIES) ---
 # --- PHASE 2: FAST SEMANTIC COHERENCE VERIFICATION (WITH RETRIES) ---
 def verify_semantic_coherence(bug_report: str, max_retries=3):
-    """Fast, token-capped check for logical alignment between Steps and Results with auto-retry."""
+    """Checks logical coherence and detects irrelevant/nonsensical text."""
     prompt = (
-        "You are a STRICT and UNFORGIVING Quality Assurance Gatekeeper. "
-        "Analyze the following bug report. You must reject it by returning 'VERDICT: CONTRADICTORY' "
-        "if you detect ANY of the following:\n"
-        "1. Logical contradictions between steps and results.\n"
-        "2. ANY nonsensical, surreal, or completely irrelevant sentences injected into the text "
-        "(e.g., 'the sun goes blue', 'I baked a cake', 'dogs are barking').\n"
-        "CRITICAL RULE: Even if 99% of the report contains valid, highly technical code, "
-        "the presence of ONE irrelevant or surreal sentence MUST trigger a CONTRADICTORY verdict.\n\n"
-        f"Bug Report:\n\"\"\"{bug_report}\"\"\"\n\n"
-        "Respond in EXACTLY two lines:\n"
-        "VERDICT: [COHERENT or CONTRADICTORY]\n"
-        "REASON: [One short sentence explaining the contradiction or quoting the nonsense]"
+        "You are an automated Quality Assurance validator.\n"
+        "Read this entire software defect report carefully.\n\n"
+        "TASK:\n"
+        "Determine if the report contains logical contradictions OR completely irrelevant/nonsensical "
+        "statements (for example, talking about the sky, sun, weather, food, animals, or unrelated daily life "
+        "inside a technical software issue).\n\n"
+        f"DEFECT REPORT:\n\"\"\"{bug_report}\"\"\"\n\n"
+        "INSTRUCTIONS:\n"
+        "- If you find ANY irrelevant, nonsensical sentence (e.g. 'the sun is blue') or contradiction, "
+        "your response MUST contain the single word: CONTRADICTORY\n"
+        "- If the entire report is coherent and exclusively describes software behavior, respond: COHERENT\n\n"
+        "Format:\n"
+        "VERDICT: [CONTRADICTORY or COHERENT]\n"
+        "REASON: [Brief explanation]"
     )
     
     for attempt in range(max_retries):
@@ -278,16 +280,23 @@ def verify_semantic_coherence(bug_report: str, max_retries=3):
                 prompt,
                 generation_config=genai.types.GenerationConfig(
                     temperature=0.0,
-                    max_output_tokens=60
-                )
+                    max_output_tokens=80
+                ),
+                request_options={"timeout": 12.0}
             ).text.strip()
-            lines = [line.strip() for line in res.splitlines() if line.strip()]
-            verdict = "CONTRADICTORY" if lines and "CONTRADICTORY" in lines[0].upper() else "COHERENT"
-            reason = lines[-1].replace("REASON:", "").strip() if len(lines) > 1 else ""
+            
+            verdict = "CONTRADICTORY" if "CONTRADICTORY" in res.upper() else "COHERENT"
+            
+            reason = ""
+            for line in res.splitlines():
+                if "REASON:" in line.upper():
+                    reason = line.split(":", 1)[-1].strip()
+                    break
+                    
             return verdict, reason
         except Exception as e:
             if attempt == max_retries - 1:
-                return "COHERENT", f"Coherence check bypassed after {max_retries} retries ({e})"
+                return "FAIL_ERROR", f"API check unavailable: {e}"
             time.sleep(2)
 
 # --- PHASE 2: OPTIMIZED GENERATIVE AI RESTRUCTURING (WITH RETRIES) ---
@@ -522,12 +531,16 @@ else:
                             st.session_state.coherence_reason
                         )
                         st.rerun()
-            elif st.session_state.get("coherence_status") == "CONTRADICTORY":
-                st.warning("Flagged: Logical Contradiction Detected")
-                if st.session_state.get("coherence_reason"):
-                    st.caption(f"Reason: {st.session_state.coherence_reason}")
-            else:
-                st.success("Semantic Check: Coherent")
+           if st.session_state.get("coherence_status") == "CONTRADICTORY":
+    st.error("Flagged: Semantic Contradiction / Nonsense Detected")
+    if st.session_state.get("coherence_reason"):
+        st.caption(f"Reason: {st.session_state.coherence_reason}")
+elif st.session_state.get("coherence_status") == "FAIL_ERROR":
+    st.warning("Phase 2 Skipped: API Rate Limit or Timeout")
+    if st.session_state.get("coherence_reason"):
+        st.caption(st.session_state.coherence_reason)
+else:
+    st.success("Semantic Check: Coherent")
 
         with action_col:
             st.caption("Phase 3: External Routing")
