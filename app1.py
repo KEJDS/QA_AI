@@ -258,21 +258,21 @@ def local_heuristic_coherence_check(bug_report: str):
     return "COHERENT", f"Semantic continuity verified locally (similarity: {similarity:.3f}, domain match: {round(domain_ratio * 100, 1)}%)."
 
 def verify_semantic_coherence(bug_report: str, max_retries=3):
+    """
+    Forces the LLM to inspect every sentence for non-software concepts 
+    (weather, astronomy, colors of nature, food, animals) before deciding.
+    """
     prompt = (
-        "You are an automated Quality Assurance validator.\n"
-        "Read this entire software defect report carefully.\n\n"
-        "TASK:\n"
-        "Determine if the report contains logical contradictions OR completely irrelevant/nonsensical "
-        "statements (for example, talking about the sky, sun, weather, food, animals, or unrelated daily life "
-        "inside a technical software issue).\n\n"
-        f"DEFECT REPORT:\n\"\"\"{bug_report}\"\"\"\n\n"
-        "INSTRUCTIONS:\n"
-        "- If you find ANY irrelevant, nonsensical sentence (e.g. 'the sun is blue') or contradiction, "
-        "your response MUST contain the single word: CONTRADICTORY\n"
-        "- If the entire report is coherent and exclusively describes software behavior, respond: COHERENT\n\n"
-        "Format:\n"
+        "You are an automated triage filter for software bug reports.\n\n"
+        "Analyze this text strictly for domain relevance and logical coherence:\n"
+        f"\"\"\"{bug_report}\"\"\"\n\n"
+        "Check: Does this text contain ANY irrelevant non-software remarks, "
+        "impossible real-world events, or surreal statements (such as talking about the sun, "
+        "sky, weather, food, animals, or unrelated everyday life)?\n\n"
+        "Respond strictly in this format:\n"
+        "NON_SOFTWARE_DETECTED: [YES or NO]\n"
         "VERDICT: [CONTRADICTORY or COHERENT]\n"
-        "REASON: [Brief explanation]"
+        "REASON: [Quote the exact non-software phrase or state None]"
     )
     
     for attempt in range(max_retries):
@@ -281,24 +281,32 @@ def verify_semantic_coherence(bug_report: str, max_retries=3):
                 prompt,
                 generation_config=genai.types.GenerationConfig(
                     temperature=0.0,
-                    max_output_tokens=80
+                    max_output_tokens=100
                 ),
                 request_options={"timeout": 12.0}
             ).text.strip()
             
-            verdict = "CONTRADICTORY" if "CONTRADICTORY" in res.upper() else "COHERENT"
+            upper_res = res.upper()
             
+            # If the model finds non-software remarks OR flags contradictory, reject it:
+            if "NON_SOFTWARE_DETECTED: YES" in upper_res or "VERDICT: CONTRADICTORY" in upper_res:
+                verdict = "CONTRADICTORY"
+            else:
+                verdict = "COHERENT"
+                
             reason = ""
             for line in res.splitlines():
                 if "REASON:" in line.upper():
                     reason = line.split(":", 1)[-1].strip()
                     break
-                    
+            if not reason:
+                reason = res.replace("\n", " ")[:120]
+                
             return verdict, reason
         except Exception as e:
             if attempt == max_retries - 1:
                 fb_verdict, fb_reason = local_heuristic_coherence_check(bug_report)
-                return fb_verdict, f"[API Limit Reached - Local Fallback] {fb_reason}"
+                return fb_verdict, f"[API Quota Fallback] {fb_reason}"
             time.sleep(2)
 
 def generate_ai_response(user_question, bug_report_context, prediction_status, guideline_text="", stream=True, max_retries=3):
@@ -527,8 +535,8 @@ else:
                     st.caption(f"Reason: {st.session_state.coherence_reason}")
             else:
                 st.success("Semantic Check: Coherent")
-                if "[API Limit Reached" in st.session_state.get("coherence_reason", ""):
-                    st.caption(st.session_state.coherence_reason)
+                if st.session_state.get("coherence_reason"):
+                    st.caption(f"Note: {st.session_state.coherence_reason}")
 
         with action_col:
             st.caption("Phase 3: External Routing")
