@@ -224,38 +224,42 @@ def extract_text_from_file(file_bytes: bytes, file_name: str):
     return extracted_text
 
 def local_heuristic_coherence_check(bug_report: str):
-    clean_text = re.sub(r'[^a-zA-Z0-9\s]', ' ', bug_report.lower())
-    words = [w for w in clean_text.split() if len(w) > 2]
+    raw_sentences = [s.strip() for s in re.split(r'[.\n!?]+', bug_report) if len(s.strip()) > 0]
     
-    if len(words) < 12:
-        return "COHERENT", "Report too brief for split semantic analysis."
-
     vocab = vectorizer.vocabulary_
-    recognized_tokens = [w for w in words if w in vocab]
-    domain_ratio = len(recognized_tokens) / len(words) if words else 0.0
+    
+    for sentence in raw_sentences:
+        clean_s = re.sub(r'[^a-zA-Z0-9\s]', ' ', sentence.lower())
+        s_words = [w for w in clean_s.split() if len(w) > 2]
+        
+        if len(s_words) < 3:
+            continue
+            
+        # 1. Per-Sentence Out-Of-Domain Check
+        matched = [w for w in s_words if w in vocab]
+        sentence_domain_ratio = len(matched) / len(s_words)
+        
+        # If an individual sentence has virtually no software domain tokens
+        if sentence_domain_ratio < 0.20:
+            return (
+                "CONTRADICTORY",
+                f"Sentence-level anomaly detected: '{sentence}' ({round(sentence_domain_ratio * 100, 1)}% technical vocabulary match)."
+            )
 
-    if domain_ratio < 0.35:
-        return (
-            "CONTRADICTORY",
-            f"Fallback Check: High rate of non-software vocabulary detected ({round(domain_ratio * 100, 1)}% domain match)."
-        )
+        # 2. Per-Sentence Cosine Similarity Against the Entire Rest of the Document
+        other_sentences = " ".join([s for s in raw_sentences if s != sentence])
+        if other_sentences.strip():
+            vec_s = vectorizer.transform([sentence])
+            vec_rest = vectorizer.transform([other_sentences])
+            s_similarity = cosine_similarity(vec_s, vec_rest)[0][0]
+            
+            if s_similarity < 0.015:
+                return (
+                    "CONTRADICTORY",
+                    f"Irrelevant statement disconnected from issue context: '{sentence}' (similarity score: {s_similarity:.4f})."
+                )
 
-    midpoint = len(words) // 2
-    first_half = " ".join(words[:midpoint])
-    second_half = " ".join(words[midpoint:])
-
-    vec1 = vectorizer.transform([first_half])
-    vec2 = vectorizer.transform([second_half])
-
-    similarity = cosine_similarity(vec1, vec2)[0][0]
-
-    if similarity < 0.04:
-        return (
-            "CONTRADICTORY",
-            f"Fallback Check: Low semantic continuity between setup and outcome (cosine similarity: {similarity:.3f})."
-        )
-
-    return "COHERENT", f"Semantic continuity verified locally (similarity: {similarity:.3f}, domain match: {round(domain_ratio * 100, 1)}%)."
+    return "COHERENT", "All sentences verified for technical domain relevance and continuity."
 
 def verify_semantic_coherence(bug_report: str, max_retries=3):
     """
