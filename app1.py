@@ -2,6 +2,7 @@ import os
 import glob
 import uuid
 import time
+import re
 from datetime import datetime, timezone
 import requests
 import joblib
@@ -10,6 +11,7 @@ import streamlit as st
 import google.generativeai as genai
 from pymongo import MongoClient
 import certifi
+from sklearn.metrics.pairwise import cosine_similarity
 
 import PyPDF2
 import docx
@@ -221,6 +223,40 @@ def extract_text_from_file(file_bytes: bytes, file_name: str):
         st.error(f"Error reading the file: {e}")
     return extracted_text
 
+def local_heuristic_coherence_check(bug_report: str):
+    clean_text = re.sub(r'[^a-zA-Z0-9\s]', ' ', bug_report.lower())
+    words = [w for w in clean_text.split() if len(w) > 2]
+    
+    if len(words) < 12:
+        return "COHERENT", "Report too brief for split semantic analysis."
+
+    vocab = vectorizer.vocabulary_
+    recognized_tokens = [w for w in words if w in vocab]
+    domain_ratio = len(recognized_tokens) / len(words) if words else 0.0
+
+    if domain_ratio < 0.35:
+        return (
+            "CONTRADICTORY",
+            f"Fallback Check: High rate of non-software vocabulary detected ({round(domain_ratio * 100, 1)}% domain match)."
+        )
+
+    midpoint = len(words) // 2
+    first_half = " ".join(words[:midpoint])
+    second_half = " ".join(words[midpoint:])
+
+    vec1 = vectorizer.transform([first_half])
+    vec2 = vectorizer.transform([second_half])
+
+    similarity = cosine_similarity(vec1, vec2)[0][0]
+
+    if similarity < 0.04:
+        return (
+            "CONTRADICTORY",
+            f"Fallback Check: Low semantic continuity between setup and outcome (cosine similarity: {similarity:.3f})."
+        )
+
+    return "COHERENT", f"Semantic continuity verified locally (similarity: {similarity:.3f}, domain match: {round(domain_ratio * 100, 1)}%)."
+
 def verify_semantic_coherence(bug_report: str, max_retries=3):
     prompt = (
         "You are an automated Quality Assurance validator.\n"
@@ -261,7 +297,8 @@ def verify_semantic_coherence(bug_report: str, max_retries=3):
             return verdict, reason
         except Exception as e:
             if attempt == max_retries - 1:
-                return "FAIL_ERROR", f"API check unavailable: {e}"
+                fb_verdict, fb_reason = local_heuristic_coherence_check(bug_report)
+                return fb_verdict, f"[API Limit Reached - Local Fallback] {fb_reason}"
             time.sleep(2)
 
 def generate_ai_response(user_question, bug_report_context, prediction_status, guideline_text="", stream=True, max_retries=3):
@@ -488,12 +525,10 @@ else:
                 st.error("Flagged: Semantic Contradiction / Nonsense Detected")
                 if st.session_state.get("coherence_reason"):
                     st.caption(f"Reason: {st.session_state.coherence_reason}")
-            elif st.session_state.get("coherence_status") == "FAIL_ERROR":
-                st.warning("Phase 2 Skipped: API Rate Limit or Timeout")
-                if st.session_state.get("coherence_reason"):
-                    st.caption(st.session_state.coherence_reason)
             else:
                 st.success("Semantic Check: Coherent")
+                if "[API Limit Reached" in st.session_state.get("coherence_reason", ""):
+                    st.caption(st.session_state.coherence_reason)
 
         with action_col:
             st.caption("Phase 3: External Routing")
