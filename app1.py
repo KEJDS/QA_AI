@@ -11,15 +11,12 @@ import google.generativeai as genai
 from pymongo import MongoClient
 import certifi
 
-# --- IMPORTS FOR FILE PARSING ---
 import PyPDF2
 import docx
 
-# --- BASE DIRECTORY (Works locally and on GitHub/Streamlit Cloud) ---
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 
 def find_project_file(filename):
-    """Searches BASE_DIR and all subfolders for the target file."""
     direct_path = os.path.join(BASE_DIR, filename)
     if os.path.exists(direct_path):
         return direct_path
@@ -30,30 +27,23 @@ VEC_PATH = find_project_file("tfidf_vectorizer.pkl")
 CLF_PATH = find_project_file("logistic_regression_validator.pkl")
 SAMPLE_CSV_PATH = find_project_file("spark_sample_30.csv")
 
-# --- PAGE CONFIG ---
 st.set_page_config(page_title="BugTriage-NLP", layout="wide", initial_sidebar_state="expanded")
 
-# --- API AND ML MODEL LOADING ---
 genai.configure(api_key=st.secrets["GOOGLE_API_KEY"])
 
 @st.cache_resource
-@st.cache_resource
 def load_chat_model():
-    """Dynamically finds the best available Gemini model for your specific API key."""
-    # 1. Ask Google what models your key has permission to use
     available_models = [
         m.name for m in genai.list_models() 
         if 'generateContent' in m.supported_generation_methods
     ]
     
-    # 2. Priority list: Target 3.8 Flash based on your dashboard limits
     target_model = None
     for preferred in ["models/gemini-3.8-flash", "models/gemini-3.8-flash-latest", "gemini-3.8-flash"]:
         if preferred in available_models:
             target_model = preferred
             break
             
-    # 3. Ultimate fallback: Just grab the first available model if the preferences fail
     if not target_model and available_models:
         target_model = available_models[0]
         
@@ -66,22 +56,15 @@ def load_chat_model():
         model_name=target_model,
         system_instruction=system_instruction
     )
-    
-    return genai.GenerativeModel(
-        model_name=target_model,
-        system_instruction=system_instruction
-    )
 
 @st.cache_resource
 def load_local_ml_pipeline():
-    """Loads the Phase 1 TF-IDF Vectorizer and Logistic Regression Classifier."""
     vectorizer = joblib.load(VEC_PATH)
     validator = joblib.load(CLF_PATH)
     return vectorizer, validator
 
 @st.cache_data
 def load_sample_tickets():
-    """Safely loads the 30 sample Spark tickets if a valid CSV is present."""
     if os.path.exists(SAMPLE_CSV_PATH):
         try:
             return pd.read_csv(SAMPLE_CSV_PATH, encoding="utf-8")
@@ -93,12 +76,7 @@ chat_model = load_chat_model()
 vectorizer, validator = load_local_ml_pipeline()
 sample_df = load_sample_tickets()
 
-# --- HELPER: EXACT VALID PROBABILITY & PHASE 1 EVALUATION ---
 def evaluate_phase1_structure(report_text: str):
-    """
-    Calculates the exact probability of the report being 'Valid' (0% - 100%)
-    and determines whether it passes Phase 1 or is flagged as 'Missing_Details'.
-    """
     clean_input = report_text.strip()
     text_lower = clean_input.lower()
     word_count = len(clean_input.split())
@@ -131,10 +109,8 @@ def evaluate_phase1_structure(report_text: str):
 
     return final_prediction, valid_conf
 
-# --- DATABASE SETUP & SESSION MANAGEMENT (MongoDB Persistence) ---
 @st.cache_resource
 def init_mongo():
-    """Connects to MongoDB Atlas."""
     try:
         mongo_uri = st.secrets["MONGO_URI"]
         client = MongoClient(mongo_uri, serverSelectionTimeoutMS=5000, tlsCAFile=certifi.where())
@@ -153,7 +129,6 @@ def init_mongo():
 db = init_mongo()
 
 def create_session(session_id, bug_report, prediction, confidence, coherence_status="COHERENT", coherence_reason=""):
-    """Creates or updates a session document in MongoDB."""
     if db is None: return
     clean_text = bug_report.replace('\n', ' ').strip()
     title = clean_text[:35] + "..." if len(clean_text) > 35 else clean_text
@@ -171,7 +146,6 @@ def create_session(session_id, bug_report, prediction, confidence, coherence_sta
     db.sessions.update_one({"session_id": session_id}, {"$set": doc}, upsert=True)
 
 def save_message(session_id, role, content):
-    """Saves a single chat message document to MongoDB."""
     if db is None: return
     doc = {
         "session_id": session_id,
@@ -182,13 +156,11 @@ def save_message(session_id, role, content):
     db.chat_history.insert_one(doc)
 
 def get_all_sessions():
-    """Retrieves all sessions for the sidebar history."""
     if db is None: return []
     cursor = db.sessions.find({}, {"session_id": 1, "title": 1, "timestamp": 1, "_id": 0}).sort("timestamp", -1)
     return [(doc["session_id"], doc["title"], doc["timestamp"]) for doc in cursor]
 
 def load_session(session_id):
-    """Loads a previous session's exact metrics and messages from MongoDB into session_state."""
     if db is None: return
     session_data = db.sessions.find_one({"session_id": session_id})
 
@@ -215,7 +187,6 @@ def load_session(session_id):
         st.session_state.messages = [{"role": msg["role"], "content": msg["content"]} for msg in messages_cursor]
 
 def start_new_chat(preserve_draft=""):
-    """Resets the application state for a new or revised bug report."""
     st.session_state.session_id = str(uuid.uuid4())
     st.session_state.messages = []
     st.session_state.draft_report = preserve_draft
@@ -223,7 +194,6 @@ def start_new_chat(preserve_draft=""):
         if key in st.session_state:
             del st.session_state[key]
 
-# Session tracking Initialization
 if "session_id" not in st.session_state:
     st.session_state.session_id = str(uuid.uuid4())
 if "messages" not in st.session_state:
@@ -231,7 +201,6 @@ if "messages" not in st.session_state:
 if "draft_report" not in st.session_state:
     st.session_state.draft_report = ""
 
-# --- TEXT EXTRACTION FUNCTION ---
 @st.cache_data(show_spinner=False)
 def extract_text_from_file(file_bytes: bytes, file_name: str):
     import io
@@ -252,11 +221,7 @@ def extract_text_from_file(file_bytes: bytes, file_name: str):
         st.error(f"Error reading the file: {e}")
     return extracted_text
 
-# --- PHASE 2: FAST SEMANTIC COHERENCE VERIFICATION (WITH RETRIES) ---
-# --- PHASE 2: FAST SEMANTIC COHERENCE VERIFICATION (WITH RETRIES) ---
-# --- PHASE 2: FAST SEMANTIC COHERENCE VERIFICATION (WITH RETRIES) ---
 def verify_semantic_coherence(bug_report: str, max_retries=3):
-    """Checks logical coherence and detects irrelevant/nonsensical text."""
     prompt = (
         "You are an automated Quality Assurance validator.\n"
         "Read this entire software defect report carefully.\n\n"
@@ -299,7 +264,6 @@ def verify_semantic_coherence(bug_report: str, max_retries=3):
                 return "FAIL_ERROR", f"API check unavailable: {e}"
             time.sleep(2)
 
-# --- PHASE 2: OPTIMIZED GENERATIVE AI RESTRUCTURING (WITH RETRIES) ---
 def generate_ai_response(user_question, bug_report_context, prediction_status, guideline_text="", stream=True, max_retries=3):
     if not bug_report_context or not bug_report_context.strip():
         return "I do not have a bug report to look at yet. Please analyze one first."
@@ -338,9 +302,7 @@ def generate_ai_response(user_question, bug_report_context, prediction_status, g
                 return f"I encountered an error connecting to the cloud AI after {max_retries} retries: {e}"
             time.sleep(2)
 
-# --- PHASE 3: GITHUB REST API ISSUE EXPORT ---
 def export_to_external_system(bug_report, standardized_body, prediction):
-    """Exports the validated and restructured ticket directly to GitHub Issues via REST API."""
     github_token = st.secrets.get("GITHUB_TOKEN", "")
     github_repo = st.secrets.get("GITHUB_REPO", "")
 
@@ -373,7 +335,6 @@ def export_to_external_system(bug_report, standardized_body, prediction):
     except Exception as e:
         return False, f"Connection error: {e}"
 
-# --- STREAMLIT UI STYLING ---
 st.markdown("""
     <style>
         #MainMenu {visibility: hidden;}
@@ -389,7 +350,6 @@ st.markdown("""
     </style>
 """, unsafe_allow_html=True)
 
-# --- SIDEBAR PANELS ---
 with st.sidebar:
     if st.button("New Chat", use_container_width=True, type="primary"):
         start_new_chat()
@@ -421,12 +381,10 @@ with st.sidebar:
     else:
         st.info("No previous chats found.")
 
-# --- MAIN APPLICATION ---
 st.title("BugTriage-NLP")
 st.markdown("**Automated Defect Report Validation and Triage Assistant**")
 st.divider()
 
-# Input box when starting a fresh chat or revising an incomplete report
 if "current_report" not in st.session_state:
     st.write("Input the defect description below. The local Scikit-Learn Logistic Regression model will validate its structural integrity, followed by Gemini AI refinement.")
 
@@ -460,14 +418,12 @@ if "current_report" not in st.session_state:
             else:
                 clean_input = user_input.strip()
 
-                # Phase 1: Local TF-IDF + Logistic Regression Evaluation (INSTANT!)
                 final_prediction, valid_conf = evaluate_phase1_structure(clean_input)
 
                 st.session_state.current_report = clean_input
                 st.session_state.prediction = final_prediction
                 st.session_state.confidence = valid_conf
                 
-                # Defer the Gemini call so Phase 1 is lightning-fast
                 st.session_state.coherence_status = "PENDING"
                 st.session_state.coherence_reason = ""
 
@@ -481,7 +437,6 @@ if "current_report" not in st.session_state:
                 )
                 st.rerun()
 else:
-    # Display the active report context
     with st.expander("View Active Defect Report Context", expanded=False):
         st.write(st.session_state.current_report)
 
@@ -495,7 +450,6 @@ else:
         else:
             st.error(f"Status: Missing Details{conf_str}")
 
-    # --- BLOCK PHASE 2 CLOUD CALLS WHEN FLAGGED AS MISSING_DETAILS ---
     if st.session_state.prediction == "Missing_Details":
         with coherence_col:
             st.caption("Phase 2: Cloud LLM Gatekeeper")
@@ -511,7 +465,6 @@ else:
             st.rerun()
 
     else:
-        # Report is "Valid" -> Show Manual Trigger for Phase 2, Triage Assistant, & Phase 3 Export
         with coherence_col:
             st.caption("Phase 2: Semantic Coherence Verification")
             if st.session_state.get("coherence_status") == "PENDING":
@@ -531,16 +484,16 @@ else:
                             st.session_state.coherence_reason
                         )
                         st.rerun()
-           if st.session_state.get("coherence_status") == "CONTRADICTORY":
-    st.error("Flagged: Semantic Contradiction / Nonsense Detected")
-    if st.session_state.get("coherence_reason"):
-        st.caption(f"Reason: {st.session_state.coherence_reason}")
-elif st.session_state.get("coherence_status") == "FAIL_ERROR":
-    st.warning("Phase 2 Skipped: API Rate Limit or Timeout")
-    if st.session_state.get("coherence_reason"):
-        st.caption(st.session_state.coherence_reason)
-else:
-    st.success("Semantic Check: Coherent")
+            elif st.session_state.get("coherence_status") == "CONTRADICTORY":
+                st.error("Flagged: Semantic Contradiction / Nonsense Detected")
+                if st.session_state.get("coherence_reason"):
+                    st.caption(f"Reason: {st.session_state.coherence_reason}")
+            elif st.session_state.get("coherence_status") == "FAIL_ERROR":
+                st.warning("Phase 2 Skipped: API Rate Limit or Timeout")
+                if st.session_state.get("coherence_reason"):
+                    st.caption(st.session_state.coherence_reason)
+            else:
+                st.success("Semantic Check: Coherent")
 
         with action_col:
             st.caption("Phase 3: External Routing")
@@ -563,7 +516,6 @@ else:
 
         st.markdown("### Triage Assistant")
 
-        # Quick-action buttons trigger instant streaming instead of blocking spinners
         ai_col1, ai_col2, ai_col3 = st.columns([1, 1, 2])
         triggered_prompt = None
 
@@ -575,14 +527,12 @@ else:
             if st.button("Standardize Report Format", use_container_width=True):
                 triggered_prompt = "Rewrite this bug report into a standardized developer-ready ticket including Severity Level, Target Developer Component/Routing, Steps to Reproduce, Expected vs. Actual Results, Flagged Contradictions, and Root-Cause Analysis."
 
-        # Render existing conversation history
         chat_container = st.container()
         with chat_container:
             for idx, message in enumerate(st.session_state.messages):
                 with st.chat_message(message["role"]):
                     st.markdown(message["content"])
                     
-                    # AUTO-EXPORT & COPY BUTTONS for Assistant Messages
                     if message["role"] == "assistant":
                         dl_col, copy_col, space = st.columns([2, 3, 5])
                         with dl_col:
@@ -597,7 +547,6 @@ else:
                             with st.expander("📋 View/Copy Raw Code"):
                                 st.code(message["content"], language="markdown")
 
-        # Handle either a quick-action button click or chat_input submission with live streaming
         chat_box_input = st.chat_input("Enter a query regarding this report...")
         active_query = triggered_prompt or chat_box_input
 
@@ -634,5 +583,4 @@ else:
                         full_reply = st.write_stream(stream_text)
                         st.session_state.messages.append({"role": "assistant", "content": full_reply})
             
-            # Force rerun so the newly generated message gets the Export & Copy buttons
             st.rerun()
