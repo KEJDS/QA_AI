@@ -274,7 +274,7 @@ def verify_semantic_coherence(bug_report: str, max_retries=3):
         "impossible real-world events, or surreal statements (such as talking about the sun, "
         "sky, weather, food, animals, or unrelated everyday life)?\n\n"
         "Respond strictly in this format:\n"
-        "NON_SOFTWARE_DETECTED: [YES or NO]\n"
+        "NON_SOFTWARE: [YES or NO]\n"
         "VERDICT: [CONTRADICTORY or COHERENT]\n"
         "REASON: [Quote the exact non-software phrase or state None]"
     )
@@ -292,19 +292,24 @@ def verify_semantic_coherence(bug_report: str, max_retries=3):
             
             upper_res = res.upper()
             
-            # If the model finds non-software remarks OR flags contradictory, reject it:
-            if "NON_SOFTWARE_DETECTED: YES" in upper_res or "VERDICT: CONTRADICTORY" in upper_res:
-                verdict = "CONTRADICTORY"
-            else:
-                verdict = "COHERENT"
-                
+            # Catch ANY variation of non-software detection or contradiction
+            is_contradictory = (
+                "NON_SOFTWARE: YES" in upper_res
+                or "NON_SOFTWARE_DETECTED: YES" in upper_res
+                or "VERDICT: CONTRADICTORY" in upper_res
+                or "CONTRADICTORY" in upper_res
+            )
+            
+            verdict = "CONTRADICTORY" if is_contradictory else "COHERENT"
+            
             reason = ""
             for line in res.splitlines():
                 if "REASON:" in line.upper():
                     reason = line.split(":", 1)[-1].strip()
                     break
             if not reason:
-                reason = res.replace("\n", " ")[:120]
+                clean_lines = [l.strip() for l in res.splitlines() if l.strip()]
+                reason = " | ".join(clean_lines)[:140]
                 
             return verdict, reason
         except Exception as e:
@@ -539,7 +544,7 @@ else:
                     st.caption(f"Reason: {st.session_state.coherence_reason}")
             else:
                 st.success("Semantic Check: Coherent")
-                if st.session_state.get("coherence_reason"):
+                if st.session_state.get("coherence_reason") and "[API Quota Fallback]" in st.session_state.get("coherence_reason"):
                     st.caption(f"Note: {st.session_state.coherence_reason}")
 
         with action_col:
