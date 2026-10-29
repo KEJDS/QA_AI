@@ -308,7 +308,7 @@ def generate_ai_response(user_question, bug_report_context, prediction_status, g
         f"{guideline_block}\n"
         f"Raw Bug Report:\n\"\"\"{bug_report_context}\"\"\"\n\n"
         f"Task: {user_question}\n\n"
-        "When restructuring or analyzing, include:\n"
+        "When restructuring or analyzing, provide a thorough, complete explanation including:\n"
         "1. **Standardized Title & Summary**\n"
         "2. **Severity Level** (Blocker, Critical, Major, Minor, Trivial)\n"
         "3. **Component Routing** (Backend/Core, SQL/Database, UI/Frontend, Python/API, Network/Cluster)\n"
@@ -324,7 +324,7 @@ def generate_ai_response(user_question, bug_report_context, prediction_status, g
                 stream=stream,
                 generation_config=genai.types.GenerationConfig(
                     temperature=0.2,
-                    max_output_tokens=900
+                    max_output_tokens=2048  # Increased to prevent truncation
                 )
             )
             return response if stream else response.text
