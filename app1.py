@@ -224,47 +224,26 @@ def extract_text_from_file(file_bytes: bytes, file_name: str):
     return extracted_text
 
 def local_heuristic_coherence_check(bug_report: str):
-    raw_sentences = [s.strip() for s in re.split(r'[.\n!?]+', bug_report) if len(s.strip()) > 0]
+    clean_text = re.sub(r'[^a-zA-Z0-9\s]', ' ', bug_report.lower())
+    words = [w for w in clean_text.split() if len(w) > 2]
     
-    vocab = vectorizer.vocabulary_
-    
-    for sentence in raw_sentences:
-        clean_s = re.sub(r'[^a-zA-Z0-9\s]', ' ', sentence.lower())
-        s_words = [w for w in clean_s.split() if len(w) > 2]
-        
-        if len(s_words) < 3:
-            continue
-            
-        # 1. Per-Sentence Out-Of-Domain Check
-        matched = [w for w in s_words if w in vocab]
-        sentence_domain_ratio = len(matched) / len(s_words)
-        
-        # If an individual sentence has virtually no software domain tokens
-        if sentence_domain_ratio < 0.20:
-            return (
-                "CONTRADICTORY",
-                f"Sentence-level anomaly detected: '{sentence}' ({round(sentence_domain_ratio * 100, 1)}% technical vocabulary match)."
-            )
+    if len(words) < 12:
+        return "COHERENT", "Report too brief for split semantic analysis."
 
-        # 2. Per-Sentence Cosine Similarity Against the Entire Rest of the Document
-        other_sentences = " ".join([s for s in raw_sentences if s != sentence])
-        if other_sentences.strip():
-            vec_s = vectorizer.transform([sentence])
-            vec_rest = vectorizer.transform([other_sentences])
-            s_similarity = cosine_similarity(vec_s, vec_rest)[0][0]
-            
-            if s_similarity < 0.015:
-                return (
-                    "CONTRADICTORY",
-                    f"Irrelevant statement disconnected from issue context: '{sentence}' (similarity score: {s_similarity:.4f})."
-                )
+    midpoint = len(words) // 2
+    vec1 = vectorizer.transform([" ".join(words[:midpoint])])
+    vec2 = vectorizer.transform([" ".join(words[midpoint:])])
+    similarity = cosine_similarity(vec1, vec2)[0][0]
 
-    return "COHERENT", "All sentences verified for technical domain relevance and continuity."
+    if similarity < 0.02:
+        return "CONTRADICTORY", f"Low semantic continuity across report (similarity: {similarity:.3f})."
+
+    return "COHERENT", f"Semantic continuity verified (similarity: {similarity:.3f})."
 
 def verify_semantic_coherence(bug_report: str, max_retries=3):
     """
-    Forces the LLM to inspect every sentence for non-software concepts 
-    (weather, astronomy, colors of nature, food, animals) before deciding.
+    Uses Gemini to inspect the report for non-software concepts 
+    or logical contradictions without cutting off output tokens.
     """
     prompt = (
         "You are an automated triage filter for software bug reports.\n\n"
@@ -281,23 +260,21 @@ def verify_semantic_coherence(bug_report: str, max_retries=3):
     
     for attempt in range(max_retries):
         try:
-            res = chat_model.generate_content(
+            response = chat_model.generate_content(
                 prompt,
                 generation_config=genai.types.GenerationConfig(
                     temperature=0.0,
-                    max_output_tokens=100
-                ),
-                request_options={"timeout": 12.0}
-            ).text.strip()
+                    max_output_tokens=600
+                )
+            )
             
+            res = response.text.strip()
             upper_res = res.upper()
             
-            # Catch ANY variation of non-software detection or contradiction
             is_contradictory = (
                 "NON_SOFTWARE: YES" in upper_res
                 or "NON_SOFTWARE_DETECTED: YES" in upper_res
                 or "VERDICT: CONTRADICTORY" in upper_res
-                or "CONTRADICTORY" in upper_res
             )
             
             verdict = "CONTRADICTORY" if is_contradictory else "COHERENT"
@@ -315,7 +292,7 @@ def verify_semantic_coherence(bug_report: str, max_retries=3):
         except Exception as e:
             if attempt == max_retries - 1:
                 fb_verdict, fb_reason = local_heuristic_coherence_check(bug_report)
-                return fb_verdict, f"[API Quota Fallback] {fb_reason}"
+                return fb_verdict, f"[API Fallback ({type(e).__name__})] {fb_reason}"
             time.sleep(2)
 
 def generate_ai_response(user_question, bug_report_context, prediction_status, guideline_text="", stream=True, max_retries=3):
