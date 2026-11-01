@@ -116,12 +116,12 @@ def handle_oauth_login():
             f"scope=repo%20user:email&state=github"
         )
 
-        # FIXED: This is now st.sidebar.link_button so it never leaks into the main page
         st.sidebar.link_button("Login with GitHub", gh_auth_url, use_container_width=True)
 
     else:
         st.sidebar.success(f"Logged in as: **{st.session_state.user['name']}**")
         if st.sidebar.button("Log out", use_container_width=True):
+            # Hard reset of the user session and the current active screen
             st.session_state.user = None
             st.session_state.session_id = str(uuid.uuid4())
             st.session_state.messages = []
@@ -241,7 +241,6 @@ def save_message(session_id, role, content):
 
 def get_all_sessions(user_email):
     if db is None: return []
-    # Filter only sessions belonging to the logged-in user
     cursor = db.sessions.find({"user_email": user_email}, {"session_id": 1, "title": 1, "timestamp": 1, "_id": 0}).sort("timestamp", -1)
     return [(doc["session_id"], doc["title"], doc["timestamp"]) for doc in cursor]
 
@@ -449,13 +448,26 @@ def generate_ai_response(user_question, bug_report_context, prediction_status, g
                 return f"I encountered an error connecting to the cloud AI after {max_retries} retries: {e}"
             time.sleep(2)
 
-def export_to_external_system(bug_report, standardized_body, prediction, github_repo, access_token):
+def export_to_external_system(bug_report, standardized_body, prediction, confidence, coherence_status, coherence_reason, github_repo, access_token):
     clean_title = bug_report.strip().splitlines()[0][:65]
     issue_title = f"[BugTriage-NLP] {clean_title}"
-    issue_body = standardized_body if standardized_body else (
-        f"### Validated Defect Report\n**Phase 1 Status:** `{prediction}`\n\n"
-        f"#### Raw Defect Description\n{bug_report}"
-    )
+    
+    # -------------------------------------------------------------
+    # NEW: Build the Validation Report header based on what has run
+    # -------------------------------------------------------------
+    val_text = "### 🤖 Automated Triage Validation\n"
+    val_text += f"- **Phase 1 (Structural):** `{prediction}` ({confidence}% confidence)\n"
+    
+    # If Phase 2 was run, include it. If it's still PENDING, skip it.
+    if coherence_status and coherence_status != "PENDING":
+        val_text += f"- **Phase 2 (Semantic):** `{coherence_status}`\n"
+        if coherence_reason:
+            val_text += f"  - *Reason: {coherence_reason}*\n"
+            
+    val_text += "\n---\n\n"
+    
+    # Prepend the validation text to the AI ticket (or the raw report if no AI ticket exists)
+    issue_body = val_text + (standardized_body if standardized_body else f"#### Raw Defect Description\n{bug_report}")
 
     if not access_token or not github_repo:
         return False, "Missing user access token or Repository name."
@@ -650,12 +662,16 @@ else:
                                 (m["content"] for m in reversed(st.session_state.messages) if m["role"] == "assistant"),
                                 ""
                             )
+                            # UPDATE: Pass all validation variables into the export function
                             success, msg_out = export_to_external_system(
-                                st.session_state.current_report,
-                                latest_ai_ticket,
-                                st.session_state.prediction,
-                                target_repo.strip(),
-                                st.session_state.user.get("access_token")
+                                bug_report=st.session_state.current_report,
+                                standardized_body=latest_ai_ticket,
+                                prediction=st.session_state.prediction,
+                                confidence=st.session_state.get("confidence", 0.0),
+                                coherence_status=st.session_state.get("coherence_status"),
+                                coherence_reason=st.session_state.get("coherence_reason"),
+                                github_repo=target_repo.strip(),
+                                access_token=st.session_state.user.get("access_token")
                             )
                             if success:
                                 st.toast("Export successful!")
