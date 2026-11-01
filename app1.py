@@ -65,7 +65,7 @@ st.markdown("""
 """, unsafe_allow_html=True)
 
 # ---------------------------------------------------------
-# OAUTH 2.0 LOGIN LOGIC
+# OAUTH 2.0 LOGIN LOGIC (GITHUB ONLY)
 # ---------------------------------------------------------
 if "user" not in st.session_state:
     st.session_state.user = None
@@ -73,8 +73,8 @@ if "user" not in st.session_state:
 def handle_oauth_login():
     st.sidebar.markdown("### Authentication")
     
-    if "google" not in st.secrets or "github" not in st.secrets:
-        st.sidebar.warning("OAuth secrets missing. Exporting disabled.")
+    if "github" not in st.secrets:
+        st.sidebar.warning("GitHub OAuth secrets missing. Exporting disabled.")
         return
 
     if st.session_state.user is None:
@@ -83,31 +83,9 @@ def handle_oauth_login():
         
         if "code" in query_params:
             code = query_params["code"]
-            # FIX: Read the provider from the URL state instead of session_state
             provider = query_params.get("state") 
             
-            if provider == "google":
-                try:
-                    google_cfg = st.secrets["google"]
-                    client = OAuth2Session(
-                        google_cfg["client_id"], 
-                        google_cfg["client_secret"],
-                        redirect_uri=google_cfg["redirect_uri"]
-                    )
-                    token = client.fetch_token("https://oauth2.googleapis.com/token", code=code)
-                    resp = client.get("https://www.googleapis.com/oauth2/v1/userinfo")
-                    user_info = resp.json()
-                    st.session_state.user = {
-                        "name": user_info.get("name"),
-                        "email": user_info.get("email"),
-                        "provider": "Google"
-                    }
-                    st.query_params.clear()
-                    st.rerun()
-                except Exception as e:
-                    st.sidebar.error(f"Google Login Failed: {e}")
-            
-            elif provider == "github":
+            if provider == "github":
                 try:
                     gh_cfg = st.secrets["github"]
                     client = OAuth2Session(
@@ -128,15 +106,7 @@ def handle_oauth_login():
                 except Exception as e:
                     st.sidebar.error(f"GitHub Login Failed: {e}")
 
-        # Construct Authorization URLs with the 'state' parameter added
-        google_cfg = st.secrets["google"]
-        google_auth_url = (
-            f"https://accounts.google.com/o/oauth2/v2/auth?"
-            f"client_id={google_cfg['client_id']}&"
-            f"redirect_uri={urllib.parse.quote(google_cfg['redirect_uri'])}&"
-            f"response_type=code&scope=openid%20email%20profile&state=google"
-        )
-        
+        # Construct Authorization URL
         gh_cfg = st.secrets["github"]
         gh_auth_url = (
             f"https://github.com/login/oauth/authorize?"
@@ -145,17 +115,21 @@ def handle_oauth_login():
             f"scope=user:email&state=github"
         )
 
-        col1, col2 = st.sidebar.columns(2)
-        with col1:
-            st.link_button("Login with Google", google_auth_url, use_container_width=True)
-            
-        with col2:
-            st.link_button("Login with GitHub", gh_auth_url, use_container_width=True)
+        st.link_button("Login with GitHub", gh_auth_url, use_container_width=True)
 
     else:
-        st.sidebar.success(f"Logged in as: **{st.session_state.user['name']}** ({st.session_state.user['provider']})")
+        st.sidebar.success(f"Logged in as: **{st.session_state.user['name']}**")
         if st.sidebar.button("Log out", use_container_width=True):
+            # Hard reset of the user session and the current active screen
             st.session_state.user = None
+            st.session_state.session_id = str(uuid.uuid4())
+            st.session_state.messages = []
+            
+            for key in ["current_report", "prediction", "confidence", "coherence_status", "coherence_reason", "draft_report"]:
+                if key in st.session_state:
+                    del st.session_state[key]
+                    
+            st.query_params.clear()
             st.rerun()
 
 # Call the login handler
@@ -511,7 +485,6 @@ def export_to_external_system(bug_report, standardized_body, prediction, github_
 # ---------------------------------------------------------
 
 with st.sidebar:
-    # Set to primary so the new CSS targets and turns it green
     if st.button("New Chat", use_container_width=True, type="primary"):
         start_new_chat()
         st.rerun()
