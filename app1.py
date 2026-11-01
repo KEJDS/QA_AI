@@ -106,41 +106,13 @@ def handle_oauth_login():
                 except Exception as e:
                     st.sidebar.error(f"GitHub Login Failed: {e}")
 
-        # Construct Authorization URL (Now includes 'repo' scope for exporting!)
-        gh_cfg = st.secrets["github"]
-        gh_auth_url = (
-            f"https://github.com/login/oauth/authorize?"
-            f"client_id={gh_cfg['client_id']}&"
-            f"redirect_uri={urllib.parse.quote(gh_cfg['redirect_uri'])}&"
-            f"scope=repo%20user:email&state=github"
-        )
-
-        st.link_button("Login with GitHub", gh_auth_url, use_container_width=True)
-
-    else:
-        st.sidebar.success(f"Logged in as: **{st.session_state.user['name']}**")
-        if st.sidebar.button("Log out", use_container_width=True):
-            # Hard reset of the user session and the current active screen
-            st.session_state.user = None
-            st.session_state.session_id = str(uuid.uuid4())
-            st.session_state.messages = []
-            
-            for key in ["current_report", "prediction", "confidence", "coherence_status", "coherence_reason", "draft_report"]:
-                if key in st.session_state:
-                    del st.session_state[key]
-                    
-            st.query_params.clear()
-            st.rerun()
-                except Exception as e:
-                    st.sidebar.error(f"GitHub Login Failed: {e}")
-
         # Construct Authorization URL
         gh_cfg = st.secrets["github"]
         gh_auth_url = (
             f"https://github.com/login/oauth/authorize?"
             f"client_id={gh_cfg['client_id']}&"
             f"redirect_uri={urllib.parse.quote(gh_cfg['redirect_uri'])}&"
-            f"scope=user:email&state=github"
+            f"scope=repo%20user:email&state=github"
         )
 
         st.link_button("Login with GitHub", gh_auth_url, use_container_width=True)
