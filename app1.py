@@ -44,12 +44,13 @@ def handle_oauth_login():
     
     # If OAuth secrets are not configured, bypass login for local testing
     if "google" not in st.secrets or "github" not in st.secrets:
-        st.sidebar.warning("OAuth secrets missing. Bypassing login.")
-        st.session_state.user = {"name": "Local Tester", "email": "test@local.dev", "provider": "Bypass"}
+        st.sidebar.warning("OAuth secrets missing. Exporting disabled.")
         return
 
     if st.session_state.user is None:
+        st.sidebar.info("Sign in to enable exporting tickets to GitHub.")
         query_params = st.query_params
+        
         if "code" in query_params:
             code = query_params["code"]
             provider = st.session_state.get("oauth_provider")
@@ -96,36 +97,42 @@ def handle_oauth_login():
                 except Exception as e:
                     st.sidebar.error(f"GitHub Login Failed: {e}")
 
+        # Construct Authorization URLs
+        google_cfg = st.secrets["google"]
+        google_auth_url = (
+            f"https://accounts.google.com/o/oauth2/v2/auth?"
+            f"client_id={google_cfg['client_id']}&"
+            f"redirect_uri={urllib.parse.quote(google_cfg['redirect_uri'])}&"
+            f"response_type=code&scope=openid%20email%20profile"
+        )
+        
+        gh_cfg = st.secrets["github"]
+        gh_auth_url = (
+            f"https://github.com/login/oauth/authorize?"
+            f"client_id={gh_cfg['client_id']}&"
+            f"redirect_uri={urllib.parse.quote(gh_cfg['redirect_uri'])}&"
+            f"scope=user:email"
+        )
+
         col1, col2 = st.sidebar.columns(2)
         with col1:
-            if st.button("Sign in with Google", use_container_width=True):
-                google_cfg = st.secrets["google"]
+            # We use st.link_button to bypass 403 iframe blocking in Streamlit
+            if st.button("Set Provider: Google", use_container_width=True, help="Click this first, then click Login below"):
                 st.session_state.oauth_provider = "google"
-                google_auth_url = (
-                    f"https://accounts.google.com/o/oauth2/v2/auth?"
-                    f"client_id={google_cfg['client_id']}&"
-                    f"redirect_uri={urllib.parse.quote(google_cfg['redirect_uri'])}&"
-                    f"response_type=code&scope=openid%20email%20profile"
-                )
-                st.markdown(f'<meta http-equiv="refresh" content="0;url={google_auth_url}">', unsafe_allow_html=True)
+            st.link_button("Login with Google", google_auth_url, use_container_width=True)
+            
         with col2:
-            if st.button("Sign in with GitHub", use_container_width=True):
-                gh_cfg = st.secrets["github"]
+            if st.button("Set Provider: GitHub", use_container_width=True, help="Click this first, then click Login below"):
                 st.session_state.oauth_provider = "github"
-                gh_auth_url = (
-                    f"https://github.com/login/oauth/authorize?"
-                    f"client_id={gh_cfg['client_id']}&"
-                    f"redirect_uri={urllib.parse.quote(gh_cfg['redirect_uri'])}&"
-                    f"scope=user:email"
-                )
-                st.markdown(f'<meta http-equiv="refresh" content="0;url={gh_auth_url}">', unsafe_allow_html=True)
-        st.stop()
+            st.link_button("Login with GitHub", gh_auth_url, use_container_width=True)
+
     else:
         st.sidebar.success(f"Logged in as: **{st.session_state.user['name']}** ({st.session_state.user['provider']})")
         if st.sidebar.button("Log out", use_container_width=True):
             st.session_state.user = None
             st.rerun()
 
+# Call the login handler
 handle_oauth_login()
 
 # ---------------------------------------------------------
@@ -438,9 +445,8 @@ def generate_ai_response(user_question, bug_report_context, prediction_status, g
                 return f"I encountered an error connecting to the cloud AI after {max_retries} retries: {e}"
             time.sleep(2)
 
-def export_to_external_system(bug_report, standardized_body, prediction):
+def export_to_external_system(bug_report, standardized_body, prediction, github_repo):
     github_token = st.secrets.get("GITHUB_TOKEN", "")
-    github_repo = st.secrets.get("GITHUB_REPO", "")
 
     clean_title = bug_report.strip().splitlines()[0][:65]
     issue_title = f"[BugTriage-NLP] {clean_title}"
@@ -450,7 +456,7 @@ def export_to_external_system(bug_report, standardized_body, prediction):
     )
 
     if not github_token or not github_repo:
-        return True, "Ticket exported (Add GITHUB_TOKEN and GITHUB_REPO in secrets.toml for live GitHub repository issue creation)."
+        return False, "Missing GitHub Token in secrets or Repository name."
 
     url = f"https://api.github.com/repos/{github_repo}/issues"
     headers = {
@@ -466,7 +472,7 @@ def export_to_external_system(bug_report, standardized_body, prediction):
         resp = requests.post(url, headers=headers, json=payload, timeout=10)
         if resp.status_code in (200, 201):
             issue_url = resp.json().get("html_url", "")
-            return True, f"Ticket successfully exported to GitHub Issues: {issue_url}"
+            return True, f"Ticket successfully exported to: {issue_url}"
         return False, f"GitHub API Error ({resp.status_code}): {resp.text}"
     except Exception as e:
         return False, f"Connection error: {e}"
@@ -630,22 +636,32 @@ else:
 
         with action_col:
             st.caption("Phase 3: External Routing")
-            if st.button("Export to Tracking System", use_container_width=True):
-                with st.spinner("Connecting to GitHub REST API..."):
-                    latest_ai_ticket = next(
-                        (m["content"] for m in reversed(st.session_state.messages) if m["role"] == "assistant"),
-                        ""
-                    )
-                    success, msg_out = export_to_external_system(
-                        st.session_state.current_report,
-                        latest_ai_ticket,
-                        st.session_state.prediction
-                    )
-                    if success:
-                        st.toast(msg_out)
-                        st.success(msg_out)
+            
+            if st.session_state.user is None:
+                st.info("🔒 Sign in via the sidebar to export tickets.")
+            else:
+                target_repo = st.text_input("Target GitHub Repo", placeholder="owner/repo", help="Example: facebook/react")
+                
+                if st.button("Export to Tracking System", use_container_width=True):
+                    if not target_repo.strip():
+                        st.error("Please enter a target repository (owner/repo).")
                     else:
-                        st.error(msg_out)
+                        with st.spinner(f"Exporting to {target_repo}..."):
+                            latest_ai_ticket = next(
+                                (m["content"] for m in reversed(st.session_state.messages) if m["role"] == "assistant"),
+                                ""
+                            )
+                            success, msg_out = export_to_external_system(
+                                st.session_state.current_report,
+                                latest_ai_ticket,
+                                st.session_state.prediction,
+                                target_repo.strip()
+                            )
+                            if success:
+                                st.toast("Export successful!")
+                                st.success(msg_out)
+                            else:
+                                st.error(msg_out)
 
         st.markdown("### Triage Assistant")
 
