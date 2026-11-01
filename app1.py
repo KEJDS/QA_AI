@@ -100,7 +100,7 @@ def handle_oauth_login():
                         "name": user_info.get("name") or user_info.get("login"),
                         "email": user_info.get("email") or f"{user_info.get('login')}@github.user",
                         "provider": "GitHub",
-                        "access_token": token.get("access_token")  # Capturing the live token to use for export
+                        "access_token": token.get("access_token")
                     }
                     st.query_params.clear()
                     st.rerun()
@@ -116,12 +116,12 @@ def handle_oauth_login():
             f"scope=repo%20user:email&state=github"
         )
 
-        st.link_button("Login with GitHub", gh_auth_url, use_container_width=True)
+        # FIXED: This is now st.sidebar.link_button so it never leaks into the main page
+        st.sidebar.link_button("Login with GitHub", gh_auth_url, use_container_width=True)
 
     else:
         st.sidebar.success(f"Logged in as: **{st.session_state.user['name']}**")
         if st.sidebar.button("Log out", use_container_width=True):
-            # Hard reset of the user session and the current active screen
             st.session_state.user = None
             st.session_state.session_id = str(uuid.uuid4())
             st.session_state.messages = []
@@ -450,7 +450,6 @@ def generate_ai_response(user_question, bug_report_context, prediction_status, g
             time.sleep(2)
 
 def export_to_external_system(bug_report, standardized_body, prediction, github_repo, access_token):
-    # This line has been completely fixed. It now uses the LIVE user token instead of the secret file!
     clean_title = bug_report.strip().splitlines()[0][:65]
     issue_title = f"[BugTriage-NLP] {clean_title}"
     issue_body = standardized_body if standardized_body else (
@@ -651,7 +650,6 @@ else:
                                 (m["content"] for m in reversed(st.session_state.messages) if m["role"] == "assistant"),
                                 ""
                             )
-                            # FIX: Now passes the authenticated user's live access token
                             success, msg_out = export_to_external_system(
                                 st.session_state.current_report,
                                 latest_ai_ticket,
