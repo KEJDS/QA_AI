@@ -3,6 +3,7 @@ import glob
 import uuid
 import time
 import re
+import urllib.parse
 from datetime import datetime, timezone
 import requests
 import joblib
@@ -12,6 +13,7 @@ import google.generativeai as genai
 from pymongo import MongoClient
 import certifi
 from sklearn.metrics.pairwise import cosine_similarity
+from authlib.integrations.requests_client import OAuth2Session
 
 import PyPDF2
 import docx
@@ -31,6 +33,104 @@ SAMPLE_CSV_PATH = find_project_file("spark_sample_30.csv")
 
 st.set_page_config(page_title="BugTriage-NLP", layout="wide", initial_sidebar_state="expanded")
 
+# ---------------------------------------------------------
+# OAUTH 2.0 LOGIN LOGIC
+# ---------------------------------------------------------
+if "user" not in st.session_state:
+    st.session_state.user = None
+
+def handle_oauth_login():
+    st.sidebar.markdown("### Authentication")
+    
+    # If OAuth secrets are not configured, bypass login for local testing
+    if "google" not in st.secrets or "github" not in st.secrets:
+        st.sidebar.warning("OAuth secrets missing. Bypassing login.")
+        st.session_state.user = {"name": "Local Tester", "email": "test@local.dev", "provider": "Bypass"}
+        return
+
+    if st.session_state.user is None:
+        query_params = st.query_params
+        if "code" in query_params:
+            code = query_params["code"]
+            provider = st.session_state.get("oauth_provider")
+            
+            if provider == "google":
+                try:
+                    google_cfg = st.secrets["google"]
+                    client = OAuth2Session(
+                        google_cfg["client_id"], 
+                        google_cfg["client_secret"],
+                        redirect_uri=google_cfg["redirect_uri"]
+                    )
+                    token = client.fetch_token("https://oauth2.googleapis.com/token", code=code)
+                    resp = client.get("https://www.googleapis.com/oauth2/v1/userinfo")
+                    user_info = resp.json()
+                    st.session_state.user = {
+                        "name": user_info.get("name"),
+                        "email": user_info.get("email"),
+                        "provider": "Google"
+                    }
+                    st.query_params.clear()
+                    st.rerun()
+                except Exception as e:
+                    st.sidebar.error(f"Google Login Failed: {e}")
+            
+            elif provider == "github":
+                try:
+                    gh_cfg = st.secrets["github"]
+                    client = OAuth2Session(
+                        gh_cfg["client_id"], 
+                        gh_cfg["client_secret"],
+                        redirect_uri=gh_cfg["redirect_uri"]
+                    )
+                    token = client.fetch_token("https://github.com/login/oauth/access_token", code=code)
+                    resp = client.get("https://api.github.com/user")
+                    user_info = resp.json()
+                    st.session_state.user = {
+                        "name": user_info.get("name") or user_info.get("login"),
+                        "email": user_info.get("email"),
+                        "provider": "GitHub"
+                    }
+                    st.query_params.clear()
+                    st.rerun()
+                except Exception as e:
+                    st.sidebar.error(f"GitHub Login Failed: {e}")
+
+        col1, col2 = st.sidebar.columns(2)
+        with col1:
+            if st.button("Sign in with Google", use_container_width=True):
+                google_cfg = st.secrets["google"]
+                st.session_state.oauth_provider = "google"
+                google_auth_url = (
+                    f"https://accounts.google.com/o/oauth2/v2/auth?"
+                    f"client_id={google_cfg['client_id']}&"
+                    f"redirect_uri={urllib.parse.quote(google_cfg['redirect_uri'])}&"
+                    f"response_type=code&scope=openid%20email%20profile"
+                )
+                st.markdown(f'<meta http-equiv="refresh" content="0;url={google_auth_url}">', unsafe_allow_html=True)
+        with col2:
+            if st.button("Sign in with GitHub", use_container_width=True):
+                gh_cfg = st.secrets["github"]
+                st.session_state.oauth_provider = "github"
+                gh_auth_url = (
+                    f"https://github.com/login/oauth/authorize?"
+                    f"client_id={gh_cfg['client_id']}&"
+                    f"redirect_uri={urllib.parse.quote(gh_cfg['redirect_uri'])}&"
+                    f"scope=user:email"
+                )
+                st.markdown(f'<meta http-equiv="refresh" content="0;url={gh_auth_url}">', unsafe_allow_html=True)
+        st.stop()
+    else:
+        st.sidebar.success(f"Logged in as: **{st.session_state.user['name']}** ({st.session_state.user['provider']})")
+        if st.sidebar.button("Log out", use_container_width=True):
+            st.session_state.user = None
+            st.rerun()
+
+handle_oauth_login()
+
+# ---------------------------------------------------------
+# CORE SYSTEM INIT
+# ---------------------------------------------------------
 genai.configure(api_key=st.secrets["GOOGLE_API_KEY"])
 
 @st.cache_resource
@@ -41,13 +141,19 @@ def load_chat_model():
     ]
     
     target_model = None
-    for preferred in ["models/gemini-3.8-flash", "models/gemini-3.8-flash-latest", "gemini-3.8-flash"]:
+    for preferred in [
+        "models/gemini-2.5-flash",
+        "models/gemini-2.0-flash",
+        "models/gemini-1.5-flash",
+        "models/gemini-1.5-flash-latest"
+    ]:
         if preferred in available_models:
             target_model = preferred
             break
             
-    if not target_model and available_models:
-        target_model = available_models[0]
+    if not target_model:
+        flash_models = [m for m in available_models if "flash" in m.lower()]
+        target_model = flash_models[0] if flash_models else available_models[0]
         
     system_instruction = (
         "You are an expert Software Quality Assurance Engineer and Triage Specialist. "
@@ -78,39 +184,6 @@ chat_model = load_chat_model()
 vectorizer, validator = load_local_ml_pipeline()
 sample_df = load_sample_tickets()
 
-def evaluate_phase1_structure(report_text: str):
-    clean_input = report_text.strip()
-    text_lower = clean_input.lower()
-    word_count = len(clean_input.split())
-
-    features = vectorizer.transform([clean_input])
-    proba = validator.predict_proba(features)[0]
-    classes = list(validator.classes_)
-
-    if "Valid" in classes:
-        valid_idx = classes.index("Valid")
-    elif 1 in classes:
-        valid_idx = classes.index(1)
-    else:
-        valid_idx = -1
-
-    valid_conf = (proba[valid_idx] * 100) if valid_idx != -1 else (max(proba) * 100)
-    valid_conf = round(float(valid_conf), 2)
-
-    has_structure = (
-        ("steps" in text_lower or "reproduce" in text_lower)
-        and ("expected" in text_lower or "actual" in text_lower)
-    )
-
-    if word_count < 15:
-        final_prediction = "Missing_Details"
-    elif valid_conf >= 50.0 or (has_structure and valid_conf >= 40.0):
-        final_prediction = "Valid"
-    else:
-        final_prediction = "Missing_Details"
-
-    return final_prediction, valid_conf
-
 @st.cache_resource
 def init_mongo():
     try:
@@ -134,7 +207,6 @@ def create_session(session_id, bug_report, prediction, confidence, coherence_sta
     if db is None: return
     clean_text = bug_report.replace('\n', ' ').strip()
     title = clean_text[:35] + "..." if len(clean_text) > 35 else clean_text
-
     doc = {
         "session_id": session_id,
         "title": title,
@@ -165,7 +237,6 @@ def get_all_sessions():
 def load_session(session_id):
     if db is None: return
     session_data = db.sessions.find_one({"session_id": session_id})
-
     if session_data:
         bug_report = session_data.get("bug_report", "")
         saved_pred = session_data.get("prediction", "")
@@ -223,6 +294,39 @@ def extract_text_from_file(file_bytes: bytes, file_name: str):
         st.error(f"Error reading the file: {e}")
     return extracted_text
 
+def evaluate_phase1_structure(report_text: str):
+    clean_input = report_text.strip()
+    text_lower = clean_input.lower()
+    word_count = len(clean_input.split())
+
+    features = vectorizer.transform([clean_input])
+    proba = validator.predict_proba(features)[0]
+    classes = list(validator.classes_)
+
+    if "Valid" in classes:
+        valid_idx = classes.index("Valid")
+    elif 1 in classes:
+        valid_idx = classes.index(1)
+    else:
+        valid_idx = -1
+
+    valid_conf = (proba[valid_idx] * 100) if valid_idx != -1 else (max(proba) * 100)
+    valid_conf = round(float(valid_conf), 2)
+
+    has_structure = (
+        ("steps" in text_lower or "reproduce" in text_lower)
+        and ("expected" in text_lower or "actual" in text_lower)
+    )
+
+    if word_count < 15:
+        final_prediction = "Missing_Details"
+    elif valid_conf >= 50.0 or (has_structure and valid_conf >= 40.0):
+        final_prediction = "Valid"
+    else:
+        final_prediction = "Missing_Details"
+
+    return final_prediction, valid_conf
+
 def local_heuristic_coherence_check(bug_report: str):
     clean_text = re.sub(r'[^a-zA-Z0-9\s]', ' ', bug_report.lower())
     words = [w for w in clean_text.split() if len(w) > 2]
@@ -241,21 +345,20 @@ def local_heuristic_coherence_check(bug_report: str):
     return "COHERENT", f"Semantic continuity verified (similarity: {similarity:.3f})."
 
 def verify_semantic_coherence(bug_report: str, max_retries=3):
-    """
-    Uses Gemini to inspect the report for non-software concepts 
-    or logical contradictions without cutting off output tokens.
-    """
     prompt = (
-        "You are an automated triage filter for software bug reports.\n\n"
-        "Analyze this text strictly for domain relevance and logical coherence:\n"
+        "You are an automated Software Quality Assurance triage validator.\n\n"
+        "Read the following software defect report and evaluate its semantic coherence:\n"
         f"\"\"\"{bug_report}\"\"\"\n\n"
-        "Check: Does this text contain ANY irrelevant non-software remarks, "
-        "impossible real-world events, or surreal statements (such as talking about the sun, "
-        "sky, weather, food, animals, or unrelated everyday life)?\n\n"
-        "Respond strictly in this format:\n"
-        "NON_SOFTWARE: [YES or NO]\n"
-        "VERDICT: [CONTRADICTORY or COHERENT]\n"
-        "REASON: [Quote the exact non-software phrase or state None]"
+        "Criteria for CONTRADICTORY:\n"
+        "1. The report contains random, off-topic, or non-software sentences injected into the text "
+        "(e.g., talking about animals, weather, food, or random daily life).\n"
+        "2. The Expected Result and Actual Result logically contradict the Steps to Reproduce.\n\n"
+        "Criteria for COHERENT:\n"
+        "The entire report is a legitimate software issue description (normal greetings, sign-offs, "
+        "logs, stack traces, and configuration snippets are valid).\n\n"
+        "Respond in this exact 2-line format:\n"
+        "VERDICT: [COHERENT or CONTRADICTORY]\n"
+        "REASON: [One sentence explanation]"
     )
     
     for attempt in range(max_retries):
@@ -265,7 +368,8 @@ def verify_semantic_coherence(bug_report: str, max_retries=3):
                 generation_config=genai.types.GenerationConfig(
                     temperature=0.0,
                     max_output_tokens=600
-                )
+                ),
+                request_options={"timeout": 15.0}
             )
             
             res = response.text.strip()
@@ -275,6 +379,7 @@ def verify_semantic_coherence(bug_report: str, max_retries=3):
                 "NON_SOFTWARE: YES" in upper_res
                 or "NON_SOFTWARE_DETECTED: YES" in upper_res
                 or "VERDICT: CONTRADICTORY" in upper_res
+                or upper_res.startswith("CONTRADICTORY")
             )
             
             verdict = "CONTRADICTORY" if is_contradictory else "COHERENT"
@@ -324,7 +429,7 @@ def generate_ai_response(user_question, bug_report_context, prediction_status, g
                 stream=stream,
                 generation_config=genai.types.GenerationConfig(
                     temperature=0.2,
-                    max_output_tokens=2048  # Increased to prevent truncation
+                    max_output_tokens=2048
                 )
             )
             return response if stream else response.text
@@ -366,6 +471,9 @@ def export_to_external_system(bug_report, standardized_body, prediction):
     except Exception as e:
         return False, f"Connection error: {e}"
 
+# ---------------------------------------------------------
+# UI RENDERING
+# ---------------------------------------------------------
 st.markdown("""
     <style>
         #MainMenu {visibility: hidden;}
@@ -387,7 +495,6 @@ with st.sidebar:
         st.rerun()
 
     st.divider()
-
     st.header("Document Uploads")
     st.write("Upload QA formatting guidelines (.txt, .pdf, .docx).")
     uploaded_guideline = st.file_uploader("Select File", type=["txt", "pdf", "docx"], label_visibility="collapsed")
@@ -398,7 +505,6 @@ with st.sidebar:
             st.success("Guidelines active.")
 
     st.divider()
-
     st.header("Chat History")
     sessions = get_all_sessions()
 
@@ -448,13 +554,11 @@ if "current_report" not in st.session_state:
                 st.warning("Please enter a defect description before proceeding.")
             else:
                 clean_input = user_input.strip()
-
                 final_prediction, valid_conf = evaluate_phase1_structure(clean_input)
 
                 st.session_state.current_report = clean_input
                 st.session_state.prediction = final_prediction
                 st.session_state.confidence = valid_conf
-                
                 st.session_state.coherence_status = "PENDING"
                 st.session_state.coherence_reason = ""
 
@@ -521,7 +625,7 @@ else:
                     st.caption(f"Reason: {st.session_state.coherence_reason}")
             else:
                 st.success("Semantic Check: Coherent")
-                if st.session_state.get("coherence_reason") and "[API Quota Fallback]" in st.session_state.get("coherence_reason"):
+                if st.session_state.get("coherence_reason") and "[API Fallback" in st.session_state.get("coherence_reason"):
                     st.caption(f"Note: {st.session_state.coherence_reason}")
 
         with action_col:
