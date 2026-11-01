@@ -99,7 +99,8 @@ def handle_oauth_login():
                     st.session_state.user = {
                         "name": user_info.get("name") or user_info.get("login"),
                         "email": user_info.get("email") or f"{user_info.get('login')}@github.user",
-                        "provider": "GitHub"
+                        "provider": "GitHub",
+                        "access_token": token.get("access_token")  # Capturing the live token to use for export
                     }
                     st.query_params.clear()
                     st.rerun()
@@ -448,9 +449,8 @@ def generate_ai_response(user_question, bug_report_context, prediction_status, g
                 return f"I encountered an error connecting to the cloud AI after {max_retries} retries: {e}"
             time.sleep(2)
 
-def export_to_external_system(bug_report, standardized_body, prediction, github_repo):
-    github_token = st.secrets.get("GITHUB_TOKEN", "")
-
+def export_to_external_system(bug_report, standardized_body, prediction, github_repo, access_token):
+    # This line has been completely fixed. It now uses the LIVE user token instead of the secret file!
     clean_title = bug_report.strip().splitlines()[0][:65]
     issue_title = f"[BugTriage-NLP] {clean_title}"
     issue_body = standardized_body if standardized_body else (
@@ -458,12 +458,12 @@ def export_to_external_system(bug_report, standardized_body, prediction, github_
         f"#### Raw Defect Description\n{bug_report}"
     )
 
-    if not github_token or not github_repo:
-        return False, "Missing GitHub Token in secrets or Repository name."
+    if not access_token or not github_repo:
+        return False, "Missing user access token or Repository name."
 
     url = f"https://api.github.com/repos/{github_repo}/issues"
     headers = {
-        "Authorization": f"Bearer {github_token}",
+        "Authorization": f"Bearer {access_token}",
         "Accept": "application/vnd.github+json"
     }
     payload = {
@@ -651,11 +651,13 @@ else:
                                 (m["content"] for m in reversed(st.session_state.messages) if m["role"] == "assistant"),
                                 ""
                             )
+                            # FIX: Now passes the authenticated user's live access token
                             success, msg_out = export_to_external_system(
                                 st.session_state.current_report,
                                 latest_ai_ticket,
                                 st.session_state.prediction,
-                                target_repo.strip()
+                                target_repo.strip(),
+                                st.session_state.user.get("access_token")
                             )
                             if success:
                                 st.toast("Export successful!")
