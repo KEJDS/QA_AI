@@ -83,7 +83,8 @@ def handle_oauth_login():
         
         if "code" in query_params:
             code = query_params["code"]
-            provider = st.session_state.get("oauth_provider")
+            # FIX: Read the provider from the URL state instead of session_state
+            provider = query_params.get("state") 
             
             if provider == "google":
                 try:
@@ -127,13 +128,13 @@ def handle_oauth_login():
                 except Exception as e:
                     st.sidebar.error(f"GitHub Login Failed: {e}")
 
-        # Construct Authorization URLs
+        # Construct Authorization URLs with the 'state' parameter added
         google_cfg = st.secrets["google"]
         google_auth_url = (
             f"https://accounts.google.com/o/oauth2/v2/auth?"
             f"client_id={google_cfg['client_id']}&"
             f"redirect_uri={urllib.parse.quote(google_cfg['redirect_uri'])}&"
-            f"response_type=code&scope=openid%20email%20profile"
+            f"response_type=code&scope=openid%20email%20profile&state=google"
         )
         
         gh_cfg = st.secrets["github"]
@@ -141,18 +142,14 @@ def handle_oauth_login():
             f"https://github.com/login/oauth/authorize?"
             f"client_id={gh_cfg['client_id']}&"
             f"redirect_uri={urllib.parse.quote(gh_cfg['redirect_uri'])}&"
-            f"scope=user:email"
+            f"scope=user:email&state=github"
         )
 
         col1, col2 = st.sidebar.columns(2)
         with col1:
-            if st.button("Set Provider: Google", use_container_width=True, help="Click this first, then click Login below"):
-                st.session_state.oauth_provider = "google"
             st.link_button("Login with Google", google_auth_url, use_container_width=True)
             
         with col2:
-            if st.button("Set Provider: GitHub", use_container_width=True, help="Click this first, then click Login below"):
-                st.session_state.oauth_provider = "github"
             st.link_button("Login with GitHub", gh_auth_url, use_container_width=True)
 
     else:
