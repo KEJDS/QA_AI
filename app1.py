@@ -34,6 +34,37 @@ SAMPLE_CSV_PATH = find_project_file("spark_sample_30.csv")
 st.set_page_config(page_title="BugTriage-NLP", layout="wide", initial_sidebar_state="expanded")
 
 # ---------------------------------------------------------
+# CUSTOM CSS FOR GREEN BUTTONS
+# ---------------------------------------------------------
+st.markdown("""
+    <style>
+        #MainMenu {visibility: hidden;}
+        footer {visibility: hidden;}
+        
+        /* Change Primary Buttons to Green */
+        div.stButton > button[kind="primary"] {
+            background-color: #198754 !important;
+            color: white !important;
+            border-color: #198754 !important;
+            border-radius: 6px;
+            font-weight: 500;
+            transition: all 0.2s ease;
+        }
+        div.stButton > button[kind="primary"]:hover {
+            background-color: #157347 !important;
+            border-color: #157347 !important;
+            box-shadow: 0 4px 6px rgba(0,0,0,0.1);
+        }
+        
+        /* Standard secondary buttons styling */
+        div.stButton > button[kind="secondary"] {
+            border-radius: 6px;
+            font-weight: 500;
+        }
+    </style>
+""", unsafe_allow_html=True)
+
+# ---------------------------------------------------------
 # OAUTH 2.0 LOGIN LOGIC
 # ---------------------------------------------------------
 if "user" not in st.session_state:
@@ -42,13 +73,12 @@ if "user" not in st.session_state:
 def handle_oauth_login():
     st.sidebar.markdown("### Authentication")
     
-    # If OAuth secrets are not configured, bypass login for local testing
     if "google" not in st.secrets or "github" not in st.secrets:
         st.sidebar.warning("OAuth secrets missing. Exporting disabled.")
         return
 
     if st.session_state.user is None:
-        st.sidebar.info("Sign in to enable exporting tickets to GitHub.")
+        st.sidebar.info("Sign in to save history and export tickets.")
         query_params = st.query_params
         
         if "code" in query_params:
@@ -89,7 +119,7 @@ def handle_oauth_login():
                     user_info = resp.json()
                     st.session_state.user = {
                         "name": user_info.get("name") or user_info.get("login"),
-                        "email": user_info.get("email"),
+                        "email": user_info.get("email") or f"{user_info.get('login')}@github.user",
                         "provider": "GitHub"
                     }
                     st.query_params.clear()
@@ -116,7 +146,6 @@ def handle_oauth_login():
 
         col1, col2 = st.sidebar.columns(2)
         with col1:
-            # We use st.link_button to bypass 403 iframe blocking in Streamlit
             if st.button("Set Provider: Google", use_container_width=True, help="Click this first, then click Login below"):
                 st.session_state.oauth_provider = "google"
             st.link_button("Login with Google", google_auth_url, use_container_width=True)
@@ -200,6 +229,7 @@ def init_mongo():
         db = client["bugtriage_nlp_db"]
         
         db.sessions.create_index("session_id", unique=True)
+        db.sessions.create_index("user_email")
         db.sessions.create_index([("timestamp", -1)])
         db.chat_history.create_index("session_id")
         db.chat_history.create_index([("timestamp", 1)])
@@ -210,12 +240,13 @@ def init_mongo():
 
 db = init_mongo()
 
-def create_session(session_id, bug_report, prediction, confidence, coherence_status="COHERENT", coherence_reason=""):
+def create_session(session_id, user_email, bug_report, prediction, confidence, coherence_status="COHERENT", coherence_reason=""):
     if db is None: return
     clean_text = bug_report.replace('\n', ' ').strip()
     title = clean_text[:35] + "..." if len(clean_text) > 35 else clean_text
     doc = {
         "session_id": session_id,
+        "user_email": user_email,
         "title": title,
         "bug_report": bug_report,
         "prediction": prediction,
@@ -236,9 +267,10 @@ def save_message(session_id, role, content):
     }
     db.chat_history.insert_one(doc)
 
-def get_all_sessions():
+def get_all_sessions(user_email):
     if db is None: return []
-    cursor = db.sessions.find({}, {"session_id": 1, "title": 1, "timestamp": 1, "_id": 0}).sort("timestamp", -1)
+    # Filter only sessions belonging to the logged-in user
+    cursor = db.sessions.find({"user_email": user_email}, {"session_id": 1, "title": 1, "timestamp": 1, "_id": 0}).sort("timestamp", -1)
     return [(doc["session_id"], doc["title"], doc["timestamp"]) for doc in cursor]
 
 def load_session(session_id):
@@ -480,22 +512,9 @@ def export_to_external_system(bug_report, standardized_body, prediction, github_
 # ---------------------------------------------------------
 # UI RENDERING
 # ---------------------------------------------------------
-st.markdown("""
-    <style>
-        #MainMenu {visibility: hidden;}
-        footer {visibility: hidden;}
-        .stButton>button {
-            border-radius: 6px;
-            font-weight: 500;
-            transition: all 0.2s ease;
-        }
-        .stButton>button:hover {
-            box-shadow: 0 4px 6px rgba(0,0,0,0.05);
-        }
-    </style>
-""", unsafe_allow_html=True)
 
 with st.sidebar:
+    # Set to primary so the new CSS targets and turns it green
     if st.button("New Chat", use_container_width=True, type="primary"):
         start_new_chat()
         st.rerun()
@@ -511,18 +530,24 @@ with st.sidebar:
             st.success("Guidelines active.")
 
     st.divider()
-    st.header("Chat History")
-    sessions = get_all_sessions()
+    
+    # Hide History if not logged in
+    if st.session_state.user is not None:
+        st.header("Your Chat History")
+        user_email = st.session_state.user["email"]
+        sessions = get_all_sessions(user_email)
 
-    if sessions:
-        with st.container(height=400):
-            for sess_id, title, timestamp in sessions:
-                date_str = timestamp.split(" ")[0]
-                if st.button(f"{title} ({date_str})", key=sess_id, use_container_width=True, help="Click to resume this triage session"):
-                    load_session(sess_id)
-                    st.rerun()
+        if sessions:
+            with st.container(height=400):
+                for sess_id, title, timestamp in sessions:
+                    date_str = timestamp.split(" ")[0]
+                    if st.button(f"{title} ({date_str})", key=sess_id, use_container_width=True, help="Click to resume this triage session"):
+                        load_session(sess_id)
+                        st.rerun()
+        else:
+            st.info("No previous chats found for this account.")
     else:
-        st.info("No previous chats found.")
+        st.info("🔒 Sign in above to view and save your chat history.")
 
 st.title("BugTriage-NLP")
 st.markdown("**Automated Defect Report Validation and Triage Assistant**")
@@ -568,8 +593,11 @@ if "current_report" not in st.session_state:
                 st.session_state.coherence_status = "PENDING"
                 st.session_state.coherence_reason = ""
 
+                # Save session linked to email (or 'anonymous' if guest)
+                active_email = st.session_state.user["email"] if st.session_state.user else "anonymous"
                 create_session(
                     st.session_state.session_id,
+                    active_email,
                     clean_input,
                     st.session_state.prediction,
                     st.session_state.confidence,
@@ -616,8 +644,10 @@ else:
                         st.session_state.coherence_status = verdict
                         st.session_state.coherence_reason = reason
                         
+                        active_email = st.session_state.user["email"] if st.session_state.user else "anonymous"
                         create_session(
                             st.session_state.session_id,
+                            active_email,
                             st.session_state.current_report,
                             st.session_state.prediction,
                             st.session_state.confidence,
@@ -642,7 +672,7 @@ else:
             else:
                 target_repo = st.text_input("Target GitHub Repo", placeholder="owner/repo", help="Example: facebook/react")
                 
-                if st.button("Export to Tracking System", use_container_width=True):
+                if st.button("Export to Tracking System", use_container_width=True, type="primary"):
                     if not target_repo.strip():
                         st.error("Please enter a target repository (owner/repo).")
                     else:
