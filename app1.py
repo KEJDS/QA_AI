@@ -88,11 +88,12 @@ def handle_oauth_login():
             if provider == "github":
                 try:
                     gh_cfg = st.secrets["github"]
-                    client = OAuth2Session(
-                        gh_cfg["client_id"], 
-                        gh_cfg["client_secret"],
-                        redirect_uri=gh_cfg["redirect_uri"]
-                    )
+        gh_auth_url = (
+            f"https://github.com/login/oauth/authorize?"
+            f"client_id={gh_cfg['client_id']}&"
+            f"redirect_uri={urllib.parse.quote(gh_cfg['redirect_uri'])}&"
+            f"scope=repo%20user:email&state=github"  # Changed from just user:email
+        )
                     token = client.fetch_token("https://github.com/login/oauth/access_token", code=code)
                     resp = client.get("https://api.github.com/user")
                     user_info = resp.json()
