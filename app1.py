@@ -371,13 +371,17 @@ def verify_semantic_coherence(bug_report: str, use_gemini=False):
     contradictions = detect_contradictions(text)
     
     # --- UPGRADE: LOCAL SURREALISM & ABSURDITY DETECTOR ---
+    # --- UPGRADED LOCAL ABSURDITY & SURREALISM DETECTOR ---
     absurd_patterns = [
-        r"\b(?:toaster|bread|pumpernickel|celery|potato|soup|seagulls|purple|caramelize|origami|swan)\b",
-        r"\b(?:smells like|tastes like|singing|humming|stare intensely)\b",
-        r"\b(?:dad should finally come back|867-5309)\b",
-        r"\b(?:windows 1998 se)\b"
+        r"\b(?:toaster|bread|pumpernickel|celery|potato|soup|seagulls|purple|caramelize|origami|swan|hieroglyphics)\b",
+        r"\b(?:smells like|tastes like|singing|humming|stare intensely|facing north|whisper a polite apology)\b",
+        r"\b(?:sentient|unionized|smooth jazz|victorian ghost|sun blowing up|line of time)\b",
+        r"\b(?:windows 1998 se|soup edition)\b"
     ]
     absurd_hits = [p for p in absurd_patterns if re.search(p, lower)]
+    
+    if absurd_hits:
+        return "CONTRADICTORY", "Local anomaly rule: Detected surreal, satirical, or physically impossible claims (e.g., sentient hardware or absurd environmental steps).", confidence, metrics
     
     has_expected = _has_any(lower, EXPECTED_TERMS)
     has_actual = _has_any(lower, ACTUAL_TERMS)
