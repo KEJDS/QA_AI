@@ -268,7 +268,8 @@ def verify_semantic_coherence(bug_report: str):
                 
         return verdict, reason
     except Exception as e:
-    return "UNVERIFIED", f"Cloud AI offline ({type(e).__name__}). Manual semantic review required."
+        # FIXED: This line must be indented inside the except block
+        return "UNVERIFIED", f"Cloud AI offline ({type(e).__name__}). Manual semantic review required."
     
 def generate_ai_response(user_question, bug_report_context, prediction_status, guideline_text="", stream=True):
     if not bug_report_context.strip(): return "I do not have a bug report to look at yet."
