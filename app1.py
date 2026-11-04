@@ -433,22 +433,40 @@ with tab_workspace:
 
 with tab_dashboard:
     st.header("System Analytics & Research Data")
-    if db is not None:
-        total = db.sessions.count_documents({})
+    
+    # 1. Lock the dashboard behind authentication
+    if st.session_state.user is None:
+        st.warning("🔒 Please sign in with GitHub to view your analytics and performance logs.")
+    elif db is not None:
+        user_email = st.session_state.user["email"]
+        
+        # 2. Scope all database queries strictly to the logged-in user
+        total = db.sessions.count_documents({"user_email": user_email})
+        
         if total > 0:
-            v_count = db.sessions.count_documents({"prediction": "Valid"})
-            avg_p1_result = db.sessions.aggregate([{"$group": {"_id": None, "avg": {"$avg": "$phase1_ms"}}}]).next()["avg"]
+            v_count = db.sessions.count_documents({"user_email": user_email, "prediction": "Valid"})
+            
+            # Use $match to ensure the average is only calculated from this user's data
+            agg_pipeline = [
+                {"$match": {"user_email": user_email}},
+                {"$group": {"_id": None, "avg": {"$avg": "$phase1_ms"}}}
+            ]
+            avg_p1_cursor = list(db.sessions.aggregate(agg_pipeline))
+            avg_p1_result = avg_p1_cursor[0]["avg"] if avg_p1_cursor else None
             avg_p1_display = round(avg_p1_result, 2) if avg_p1_result is not None else 0
             
             m_col1, m_col2, m_col3 = st.columns(3)
-            m_col1.metric("Total Reports Processed", total)
+            m_col1.metric("Your Reports Processed", total)
             m_col2.metric("Valid Structure Rate", f"{round((v_count/total)*100, 1)}%")
             m_col3.metric("Avg Phase 1 Speed", f"{avg_p1_display} ms")
             
             st.subheader("Performance Logs (Research Output)")
-            logs_df = pd.DataFrame(list(db.sessions.find({}, {"session_id":1, "prediction":1, "phase1_ms":1, "phase2_ms":1, "timestamp":1, "_id":0})))
+            logs_df = pd.DataFrame(list(db.sessions.find(
+                {"user_email": user_email}, 
+                {"session_id":1, "prediction":1, "phase1_ms":1, "phase2_ms":1, "timestamp":1, "_id":0}
+            )))
             st.dataframe(logs_df, use_container_width=True)
         else:
             st.info("No data available yet. Process some defect reports to generate analytics.")
     else:
-        st.error("Database connection required for Manager Dashboard.")
+        st.error("Database connection required for the Dashboard.")
