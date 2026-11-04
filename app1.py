@@ -132,7 +132,6 @@ handle_oauth_login()
 # ---------------------------------------------------------
 # CORE SYSTEM INIT
 # ---------------------------------------------------------
-# Gemini is optional; local validation works without an API key.
 GEMINI_API_KEY = st.secrets.get("GOOGLE_API_KEY", os.getenv("GOOGLE_API_KEY", ""))
 if GEMINI_API_KEY:
     genai.configure(api_key=GEMINI_API_KEY)
@@ -296,7 +295,6 @@ def _has_any(text, phrases):
     return any(p in text for p in phrases)
 
 def calculate_relevance_score(text):
-    """Heuristic software-domain relevance score (0-100), not a probability."""
     lower = text.lower()
     matched = sorted({
         term for term in SOFTWARE_TERMS
@@ -315,7 +313,6 @@ def calculate_relevance_score(text):
     return round(min(100, score), 1), matched
 
 def calculate_sentence_similarity(text):
-    """Mean pairwise TF-IDF cosine similarity (0-100); None if not measurable."""
     sentences = [
         re.sub(r"\s+", " ", x).strip()
         for x in re.split(r"(?<=[.!?])\s+|\n+", text)
@@ -363,11 +360,6 @@ def detect_contradictions(text):
     return list(dict.fromkeys(findings))
 
 def verify_semantic_coherence(bug_report: str, use_gemini=False):
-    """
-    Returns verdict, reason, confidence, metrics.
-    Verdict is COHERENT, CONTRADICTORY, or UNVERIFIED.
-    Confidence is a heuristic evidence score, not calibrated probability.
-    """
     text = (bug_report or "").strip()
     lower = text.lower()
     words = re.findall(r"\b\w+\b", text)
@@ -398,13 +390,18 @@ def verify_semantic_coherence(bug_report: str, use_gemini=False):
         "has_expected": has_expected, "has_actual": has_actual,
     }
 
-    # Optional cloud review. Any API error falls back to local decisions.
     if use_gemini and chat_model is not None:
         prompt = (
-            "Review this software defect report for coherence. Flag only clear "
-            "irrelevant content or logical contradictions. Do not invent facts. "
-            "Return exactly VERDICT: COHERENT, CONTRADICTORY, or UNVERIFIED "
-            "and REASON: concise explanation.\\n\\nReport:\\n" + text
+            "You are a strict Software Quality Assurance Reviewer. Your task is to evaluate the logical and professional coherence of the following defect report.\n\n"
+            f"\"\"\"{text}\"\"\"\n\n"
+            "EVALUATION CRITERIA:\n"
+            "1. COHERENT: Every sentence logically belongs in a professional IT/software defect report. It strictly describes system behavior, configurations, code, expected results, or actual software errors.\n"
+            "2. CONTRADICTORY: The text contains ANY phrase, sentence, or claim that is physically impossible in a software context, breaks professional tone (jokes, song lyrics, slang, random personal thoughts), or has absolutely no logical connection to software engineering.\n\n"
+            "INSTRUCTION:\n"
+            "Do not rationalize metaphors or assume typos. If the report contains even one irrelevant, impossible, or nonsensical phrase, you must flag it as CONTRADICTORY.\n\n"
+            "Respond EXACTLY in this format:\n"
+            "VERDICT: [COHERENT or CONTRADICTORY]\n"
+            "REASON: [Quote the exact incoherent phrase found, or state 'Semantic logic verified']"
         )
         try:
             response = chat_model.generate_content(
@@ -414,15 +411,18 @@ def verify_semantic_coherence(bug_report: str, use_gemini=False):
                 ),
                 request_options={"timeout": 15.0},
             )
-            answer = response.text.strip()
-            upper = answer.upper()
-            if "VERDICT: CONTRADICTORY" in upper:
-                return "CONTRADICTORY", answer, max(confidence, 85), metrics
-            if "VERDICT: COHERENT" in upper:
-                return "COHERENT", answer, max(confidence, 80), metrics
-            return "UNVERIFIED", answer, confidence, metrics
+            res = response.text.upper()
+            verdict = "CONTRADICTORY" if "CONTRADICTORY" in res else "COHERENT"
+            
+            reason = "Semantic logic verified."
+            for line in response.text.splitlines():
+                if "REASON:" in line.upper():
+                    reason = line.split(":", 1)[-1].replace("**", "").strip()
+                    break
+            return verdict, reason, max(confidence, 85), metrics
         except Exception as exc:
             metrics["gemini_error"] = type(exc).__name__
+            return "UNVERIFIED", f"Cloud AI offline ({type(exc).__name__}). Manual semantic review required.", confidence, metrics
 
     if contradictions:
         return "CONTRADICTORY", "Local contradiction rule(s): " + "; ".join(contradictions), confidence, metrics
@@ -559,6 +559,22 @@ with tab_workspace:
             st.caption(f"Phase 1: Validation ({st.session_state.get('phase1_ms', 0)}ms)")
             if st.session_state.prediction == "Valid": st.success(f"Valid Structure ({st.session_state.confidence}%)")
             else: st.error(f"Missing Details ({st.session_state.confidence}%)")
+            
+            # --- RETRY PHASE 1 BUTTON ---
+            if st.button("🔄 Re-run Phase 1", use_container_width=True):
+                with st.spinner("Re-evaluating structural integrity..."):
+                    t0 = time.time()
+                    final_prediction, valid_conf = evaluate_phase1_structure(st.session_state.current_report)
+                    t1 = time.time()
+                    st.session_state.update({
+                        "prediction": final_prediction,
+                        "confidence": valid_conf,
+                        "phase1_ms": int((t1 - t0) * 1000)
+                    })
+                    email = st.session_state.user["email"] if st.session_state.user else "anonymous"
+                    create_session(st.session_state.session_id, email, st.session_state.current_report, final_prediction, valid_conf, p1_ms=st.session_state.phase1_ms, p2_ms=st.session_state.get("phase2_ms", 0))
+                    st.success("Phase 1 re-evaluated successfully!")
+                    st.rerun()
 
         if st.session_state.prediction == "Missing_Details":
             with col2:
@@ -581,39 +597,44 @@ with tab_workspace:
                 if not gemini_available:
                     st.caption("Gemini unavailable — local checker is ready.")
 
-                if st.session_state.get("coherence_status") == "PENDING":
-                    if st.button("Run Coherence Check", type="secondary"):
-                        with st.spinner("Running coherence checks..."):
-                            t0 = time.time()
-                            verdict, reason, p2_confidence, p2_metrics = verify_semantic_coherence(
-                                st.session_state.current_report,
-                                use_gemini=use_gemini_phase2
-                            )
-                            t1 = time.time()
-                            st.session_state.update({
-                                "coherence_status": verdict,
-                                "coherence_reason": reason,
-                                "coherence_confidence": p2_confidence,
-                                "coherence_details": p2_metrics,
-                                "phase2_ms": int((t1 - t0) * 1000)
-                            })
-                            create_session(
-                                st.session_state.session_id,
-                                st.session_state.user["email"] if st.session_state.user else "anonymous",
-                                st.session_state.current_report,
-                                st.session_state.prediction,
-                                st.session_state.confidence,
-                                verdict, reason,
-                                st.session_state.phase1_ms,
-                                st.session_state.phase2_ms
-                            )
-                            st.rerun()
-                elif st.session_state.coherence_status == "CONTRADICTORY":
+                # Button text changes depending on whether it has already run or needs a retry
+                btn_label = "Run Coherence Check" if st.session_state.get("coherence_status", "PENDING") == "PENDING" else "🔄 Re-run Coherence Check"
+                
+                if st.button(btn_label, type="secondary", use_container_width=True):
+                    with st.spinner("Running coherence checks..."):
+                        t0 = time.time()
+                        verdict, reason, p2_confidence, p2_metrics = verify_semantic_coherence(
+                            st.session_state.current_report,
+                            use_gemini=use_gemini_phase2
+                        )
+                        t1 = time.time()
+                        st.session_state.update({
+                            "coherence_status": verdict,
+                            "coherence_reason": reason,
+                            "coherence_confidence": p2_confidence,
+                            "coherence_details": p2_metrics,
+                            "phase2_ms": int((t1 - t0) * 1000)
+                        })
+                        create_session(
+                            st.session_state.session_id,
+                            st.session_state.user["email"] if st.session_state.user else "anonymous",
+                            st.session_state.current_report,
+                            st.session_state.prediction,
+                            st.session_state.confidence,
+                            verdict, reason,
+                            st.session_state.phase1_ms,
+                            st.session_state.phase2_ms
+                        )
+                        st.rerun()
+
+                if st.session_state.get("coherence_status") == "CONTRADICTORY":
                     st.error(f"Flagged: {st.session_state.coherence_reason}")
                     st.metric("Coherence confidence", f"{st.session_state.get('coherence_confidence', 0)}%")
-                elif st.session_state.coherence_status == "UNVERIFIED":
+                elif st.session_state.get("coherence_status") == "UNVERIFIED":
                     st.warning(f"Manual review required: {st.session_state.coherence_reason}")
                     st.metric("Coherence confidence", f"{st.session_state.get('coherence_confidence', 0)}%")
+                elif st.session_state.get("coherence_status") == "PENDING":
+                    st.info("Awaiting Coherence Verification")
                 else:
                     st.success(st.session_state.coherence_reason)
                     st.metric("Coherence confidence", f"{st.session_state.get('coherence_confidence', 0)}%")
@@ -668,19 +689,14 @@ with tab_workspace:
 with tab_dashboard:
     st.header("System Analytics & Research Data")
     
-    # 1. Lock the dashboard behind authentication
     if st.session_state.user is None:
         st.warning("🔒 Please sign in with GitHub to view your analytics and performance logs.")
     elif db is not None:
         user_email = st.session_state.user["email"]
-        
-        # 2. Scope all database queries strictly to the logged-in user
         total = db.sessions.count_documents({"user_email": user_email})
         
         if total > 0:
             v_count = db.sessions.count_documents({"user_email": user_email, "prediction": "Valid"})
-            
-            # Use $match to ensure the average is only calculated from this user's data
             agg_pipeline = [
                 {"$match": {"user_email": user_email}},
                 {"$group": {"_id": None, "avg": {"$avg": "$phase1_ms"}}}
