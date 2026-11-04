@@ -363,15 +363,25 @@ def verify_semantic_coherence(bug_report: str, use_gemini=False):
     text = (bug_report or "").strip()
     lower = text.lower()
     words = re.findall(r"\b\w+\b", text)
+    
+    # Initialize default metrics and confidence to prevent UnboundLocalError
+    confidence = 50.0
+    metrics = {
+        "relevance": 0.0, "similarity": None,
+        "contradictions": [], "matched_terms": [],
+        "word_count": len(words), "has_steps": False,
+        "has_expected": False, "has_actual": False,
+        "absurd_hits": 0
+    }
+
     if not text:
-        return "UNVERIFIED", "No report provided.", 0.0, {}
+        return "UNVERIFIED", "No report provided.", confidence, metrics
 
     relevance, matched = calculate_relevance_score(text)
     similarity = calculate_sentence_similarity(text)
     contradictions = detect_contradictions(text)
     
-    # --- UPGRADE: LOCAL SURREALISM & ABSURDITY DETECTOR ---
-    # --- UPGRADED LOCAL ABSURDITY & SURREALISM DETECTOR ---
+    # --- UPGRADED LOCAL SURREALISM & ABSURDITY DETECTOR ---
     absurd_patterns = [
         r"\b(?:toaster|bread|pumpernickel|celery|potato|soup|seagulls|purple|caramelize|origami|swan|hieroglyphics)\b",
         r"\b(?:smells like|tastes like|singing|humming|stare intensely|facing north|whisper a polite apology)\b",
@@ -379,9 +389,6 @@ def verify_semantic_coherence(bug_report: str, use_gemini=False):
         r"\b(?:windows 1998 se|soup edition)\b"
     ]
     absurd_hits = [p for p in absurd_patterns if re.search(p, lower)]
-    
-    if absurd_hits:
-        return "CONTRADICTORY", "Local anomaly rule: Detected surreal, satirical, or physically impossible claims (e.g., sentient hardware or absurd environmental steps).", confidence, metrics
     
     has_expected = _has_any(lower, EXPECTED_TERMS)
     has_actual = _has_any(lower, ACTUAL_TERMS)
@@ -436,11 +443,10 @@ def verify_semantic_coherence(bug_report: str, use_gemini=False):
             return verdict, reason, max(confidence, 85), metrics
         except Exception as exc:
             metrics["gemini_error"] = type(exc).__name__
-            # Fall through to local rules if Gemini fails
 
     # --- ENFORCED LOCAL CHECK FOR ABSURDITY ---
     if absurd_hits:
-        return "CONTRADICTORY", "Local anomaly rule: Detected surreal, non-software, or physically impossible claims (e.g., food items used as hardware or impossible database side-effects).", confidence, metrics
+        return "CONTRADICTORY", "Local anomaly rule: Detected surreal, satirical, or physically impossible claims (e.g., sentient hardware or absurd environmental steps).", confidence, metrics
 
     if contradictions:
         return "CONTRADICTORY", "Local contradiction rule(s): " + "; ".join(contradictions), confidence, metrics
