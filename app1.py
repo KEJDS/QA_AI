@@ -391,17 +391,16 @@ def verify_semantic_coherence(bug_report: str, use_gemini=False):
     }
 
     if use_gemini and chat_model is not None:
-        prompt = (
-            "You are a strict Software Quality Assurance Reviewer. Your task is to evaluate the logical and professional coherence of the following defect report.\n\n"
-            f"\"\"\"{text}\"\"\"\n\n"
-            "EVALUATION CRITERIA:\n"
-            "1. COHERENT: Every sentence logically belongs in a professional IT/software defect report. It strictly describes system behavior, configurations, code, expected results, or actual software errors.\n"
-            "2. CONTRADICTORY: The text contains ANY phrase, sentence, or claim that is physically impossible in a software context, breaks professional tone (jokes, song lyrics, slang, random personal thoughts), or has absolutely no logical connection to software engineering.\n\n"
-            "INSTRUCTION:\n"
-            "Do not rationalize metaphors or assume typos. If the report contains even one irrelevant, impossible, or nonsensical phrase, you must flag it as CONTRADICTORY.\n\n"
+       prompt = (
+            "You are a zero-tolerance software quality assurance gatekeeper.\n\n"
+            f"Analyze this defect report word-for-word:\n\"\"\"{text}\"\"\"\n\n"
+            "EVALUATION INSTRUCTIONS:\n"
+            "1. Scan the text for ANY slang, pop-culture references, jokes, song lyrics (e.g., 'up town funk you up'), or physically impossible events (e.g., 'the sun blew up'), no matter how much valid technical code is present.\n"
+            "2. If you find EVEN ONE such phrase, your verdict MUST be CONTRADICTORY.\n"
+            "3. Only output COHERENT if 100% of the text describes a legitimate software problem or configuration.\n\n"
             "Respond EXACTLY in this format:\n"
             "VERDICT: [COHERENT or CONTRADICTORY]\n"
-            "REASON: [Quote the exact incoherent phrase found, or state 'Semantic logic verified']"
+            "REASON: [If contradictory, quote the exact bad phrase. If coherent, write 'Semantic logic verified']"
         )
         try:
             response = chat_model.generate_content(
@@ -432,8 +431,6 @@ def verify_semantic_coherence(bug_report: str, use_gemini=False):
         return "UNVERIFIED", "Low software relevance score. Manual review required.", min(confidence, 50), metrics
     if section_count < 2:
         return "UNVERIFIED", "Insufficient expected/actual/steps evidence. Manual review required.", min(confidence, 60), metrics
-    if similarity is not None and similarity < 3 and len(re.findall(r"[.!?]", text)) >= 2:
-        return "UNVERIFIED", "Sentence similarity is very low; manual review recommended.", min(confidence, 60), metrics
 
     return "COHERENT", "Local checks passed. This does not guarantee semantic correctness.", confidence, metrics
 
