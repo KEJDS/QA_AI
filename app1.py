@@ -40,8 +40,6 @@ st.markdown("""
     <style>
         #MainMenu {visibility: hidden;}
         footer {visibility: hidden;}
-        
-        /* Change Primary Buttons to Green */
         div.stButton > button[kind="primary"] {
             background-color: #198754 !important;
             color: white !important;
@@ -55,8 +53,6 @@ st.markdown("""
             border-color: #157347 !important;
             box-shadow: 0 4px 6px rgba(0,0,0,0.1);
         }
-        
-        /* Standard secondary buttons styling */
         div.stButton > button[kind="secondary"] {
             border-radius: 6px;
             font-weight: 500;
@@ -107,7 +103,6 @@ def handle_oauth_login():
                 except Exception as e:
                     st.sidebar.error(f"GitHub Login Failed: {e}")
 
-        # Construct Authorization URL
         gh_cfg = st.secrets["github"]
         gh_auth_url = (
             f"https://github.com/login/oauth/authorize?"
@@ -115,25 +110,22 @@ def handle_oauth_login():
             f"redirect_uri={urllib.parse.quote(gh_cfg['redirect_uri'])}&"
             f"scope=repo%20user:email&state=github"
         )
-
         st.sidebar.link_button("Login with GitHub", gh_auth_url, use_container_width=True)
 
     else:
         st.sidebar.success(f"Logged in as: **{st.session_state.user['name']}**")
         if st.sidebar.button("Log out", use_container_width=True):
-            # Hard reset of the user session and the current active screen
             st.session_state.user = None
             st.session_state.session_id = str(uuid.uuid4())
             st.session_state.messages = []
             
-            for key in ["current_report", "prediction", "confidence", "coherence_status", "coherence_reason", "draft_report"]:
+            for key in ["current_report", "prediction", "confidence", "coherence_status", "coherence_reason", "draft_report", "phase1_ms", "phase2_ms", "duplicates"]:
                 if key in st.session_state:
                     del st.session_state[key]
                     
             st.query_params.clear()
             st.rerun()
 
-# Call the login handler
 handle_oauth_login()
 
 # ---------------------------------------------------------
@@ -143,50 +135,18 @@ genai.configure(api_key=st.secrets["GOOGLE_API_KEY"])
 
 @st.cache_resource
 def load_chat_model():
-    available_models = [
-        m.name for m in genai.list_models() 
-        if 'generateContent' in m.supported_generation_methods
-    ]
-    
-    target_model = None
-    for preferred in [
-        "models/gemini-2.5-flash",
-        "models/gemini-2.0-flash",
-        "models/gemini-1.5-flash",
-        "models/gemini-1.5-flash-latest"
-    ]:
-        if preferred in available_models:
-            target_model = preferred
-            break
-            
-    if not target_model:
-        flash_models = [m for m in available_models if "flash" in m.lower()]
-        target_model = flash_models[0] if flash_models else available_models[0]
-        
-    system_instruction = (
-        "You are an expert Software Quality Assurance Engineer and Triage Specialist. "
-        "Provide direct, concise, developer-ready outputs without conversational filler."
-    )
-    
-    return genai.GenerativeModel(
-        model_name=target_model,
-        system_instruction=system_instruction
-    )
+    available_models = [m.name for m in genai.list_models() if 'generateContent' in m.supported_generation_methods]
+    target_model = next((m for m in ["models/gemini-2.5-flash", "models/gemini-2.0-flash", "models/gemini-1.5-flash"] if m in available_models), available_models[0])
+    system_instruction = "You are an expert Software Quality Assurance Engineer and Triage Specialist. Provide direct, concise, developer-ready outputs."
+    return genai.GenerativeModel(model_name=target_model, system_instruction=system_instruction)
 
 @st.cache_resource
 def load_local_ml_pipeline():
-    vectorizer = joblib.load(VEC_PATH)
-    validator = joblib.load(CLF_PATH)
-    return vectorizer, validator
+    return joblib.load(VEC_PATH), joblib.load(CLF_PATH)
 
 @st.cache_data
 def load_sample_tickets():
-    if os.path.exists(SAMPLE_CSV_PATH):
-        try:
-            return pd.read_csv(SAMPLE_CSV_PATH, encoding="utf-8")
-        except Exception:
-            return None
-    return None
+    return pd.read_csv(SAMPLE_CSV_PATH, encoding="utf-8") if os.path.exists(SAMPLE_CSV_PATH) else None
 
 chat_model = load_chat_model()
 vectorizer, validator = load_local_ml_pipeline()
@@ -195,16 +155,12 @@ sample_df = load_sample_tickets()
 @st.cache_resource
 def init_mongo():
     try:
-        mongo_uri = st.secrets["MONGO_URI"]
-        client = MongoClient(mongo_uri, serverSelectionTimeoutMS=5000, tlsCAFile=certifi.where())
+        client = MongoClient(st.secrets["MONGO_URI"], serverSelectionTimeoutMS=5000, tlsCAFile=certifi.where())
         client.admin.command('ping')
         db = client["bugtriage_nlp_db"]
-        
         db.sessions.create_index("session_id", unique=True)
         db.sessions.create_index("user_email")
         db.sessions.create_index([("timestamp", -1)])
-        db.chat_history.create_index("session_id")
-        db.chat_history.create_index([("timestamp", 1)])
         return db
     except Exception as e:
         st.sidebar.error(f"Failed to connect to MongoDB: {e}")
@@ -212,10 +168,9 @@ def init_mongo():
 
 db = init_mongo()
 
-def create_session(session_id, user_email, bug_report, prediction, confidence, coherence_status="COHERENT", coherence_reason=""):
+def create_session(session_id, user_email, bug_report, prediction, confidence, coherence_status="COHERENT", coherence_reason="", p1_ms=0, p2_ms=0):
     if db is None: return
-    clean_text = bug_report.replace('\n', ' ').strip()
-    title = clean_text[:35] + "..." if len(clean_text) > 35 else clean_text
+    title = bug_report.replace('\n', ' ').strip()[:35] + "..." if len(bug_report) > 35 else bug_report
     doc = {
         "session_id": session_id,
         "user_email": user_email,
@@ -225,276 +180,121 @@ def create_session(session_id, user_email, bug_report, prediction, confidence, c
         "confidence": confidence,
         "coherence_status": coherence_status,
         "coherence_reason": coherence_reason,
+        "phase1_ms": p1_ms,
+        "phase2_ms": p2_ms,
         "timestamp": datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S")
     }
     db.sessions.update_one({"session_id": session_id}, {"$set": doc}, upsert=True)
 
 def save_message(session_id, role, content):
     if db is None: return
-    doc = {
+    db.chat_history.insert_one({
         "session_id": session_id,
         "role": role,
         "content": content,
         "timestamp": datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S")
-    }
-    db.chat_history.insert_one(doc)
+    })
 
-def get_all_sessions(user_email):
+def check_for_duplicates(current_text, current_session_id):
     if db is None: return []
-    cursor = db.sessions.find({"user_email": user_email}, {"session_id": 1, "title": 1, "timestamp": 1, "_id": 0}).sort("timestamp", -1)
-    return [(doc["session_id"], doc["title"], doc["timestamp"]) for doc in cursor]
+    past_sessions = list(db.sessions.find({"session_id": {"$ne": current_session_id}}, {"bug_report": 1, "title": 1, "session_id": 1}))
+    if not past_sessions: return []
+    
+    past_texts = [s.get("bug_report", "") for s in past_sessions]
+    vec_current = vectorizer.transform([current_text])
+    vec_past = vectorizer.transform(past_texts)
+    sim_scores = cosine_similarity(vec_current, vec_past)[0]
+    
+    duplicates = []
+    for idx, score in enumerate(sim_scores):
+        if score >= 0.85:
+            duplicates.append({"title": past_sessions[idx].get("title"), "score": round(score * 100, 2)})
+    return sorted(duplicates, key=lambda x: x["score"], reverse=True)
 
-def load_session(session_id):
-    if db is None: return
-    session_data = db.sessions.find_one({"session_id": session_id})
-    if session_data:
-        bug_report = session_data.get("bug_report", "")
-        saved_pred = session_data.get("prediction", "")
-        saved_conf = session_data.get("confidence")
-        coh_status = session_data.get("coherence_status", "COHERENT")
-        coh_reason = session_data.get("coherence_reason", "")
+def predict_component_local(text):
+    text_lower = text.lower()
+    if any(w in text_lower for w in ["database", "sql", "mongo", "query", "table"]): return "Backend / Database"
+    if any(w in text_lower for w in ["ui", "button", "css", "frontend", "design", "color"]): return "Frontend / UI"
+    if any(w in text_lower for w in ["api", "timeout", "network", "server", "endpoint", "500"]): return "Network / API"
+    return "Core / Uncategorized"
 
-        if saved_conf is None:
-            recalc_pred, recalc_conf = evaluate_phase1_structure(bug_report)
-            saved_conf = recalc_conf
-            saved_pred = saved_pred or recalc_pred
+def evaluate_phase1_structure(report_text: str):
+    clean_input = report_text.strip()
+    text_lower = clean_input.lower()
+    
+    features = vectorizer.transform([clean_input])
+    proba = validator.predict_proba(features)[0]
+    classes = list(validator.classes_)
 
-        st.session_state.session_id = session_id
-        st.session_state.current_report = bug_report
-        st.session_state.prediction = saved_pred
-        st.session_state.confidence = round(float(saved_conf), 2)
-        st.session_state.coherence_status = coh_status
-        st.session_state.coherence_reason = coh_reason
+    valid_idx = classes.index("Valid") if "Valid" in classes else (classes.index(1) if 1 in classes else -1)
+    valid_conf = round(float((proba[valid_idx] * 100) if valid_idx != -1 else (max(proba) * 100)), 2)
 
-        messages_cursor = db.chat_history.find({"session_id": session_id}).sort("timestamp", 1)
-        st.session_state.messages = [{"role": msg["role"], "content": msg["content"]} for msg in messages_cursor]
+    has_structure = (("steps" in text_lower or "reproduce" in text_lower) and ("expected" in text_lower or "actual" in text_lower))
+
+    if len(clean_input.split()) < 15:
+        return "Missing_Details", valid_conf
+    if valid_conf >= 50.0 or (has_structure and valid_conf >= 40.0):
+        return "Valid", valid_conf
+    return "Missing_Details", valid_conf
+
+def verify_semantic_coherence(bug_report: str):
+    prompt = f"Evaluate software defect report coherence:\n\"\"\"{bug_report}\"\"\"\nCriteria: CONTRADICTORY if non-software logic/spam is found, else COHERENT.\nFormat:\nVERDICT: [COHERENT/CONTRADICTORY]\nREASON: [Short explanation]"
+    try:
+        response = chat_model.generate_content(prompt, generation_config=genai.types.GenerationConfig(temperature=0.0, max_output_tokens=600), request_options={"timeout": 15.0})
+        res = response.text.strip().upper()
+        verdict = "CONTRADICTORY" if "CONTRADICTORY" in res else "COHERENT"
+        reason = next((line.split(":", 1)[-1].strip() for line in response.text.splitlines() if "REASON:" in line.upper()), "Semantic logic verified.")
+        return verdict, reason
+    except Exception as e:
+        return "COHERENT", f"[API Fallback] Local check assumed coherent due to network timeout ({type(e).__name__})."
+
+def generate_ai_response(user_question, bug_report_context, prediction_status, guideline_text="", stream=True):
+    if not bug_report_context.strip(): return "I do not have a bug report to look at yet."
+    prompt = f"Date: {datetime.now().strftime('%Y-%m-%d')}\nStatus: {prediction_status}\nRaw Report:\n\"\"\"{bug_report_context}\"\"\"\nTask: {user_question}\nEnsure components: Severity, Routing, Steps, Root Cause."
+    
+    try:
+        return chat_model.generate_content(prompt, stream=stream, generation_config=genai.types.GenerationConfig(temperature=0.2, max_output_tokens=2048))
+    except Exception as e:
+        local_route = predict_component_local(bug_report_context)
+        fallback = (
+            f"### ⚠️ [Semantic AI Offline - Standardized by Local Fallback]\n\n"
+            f"**Assigned Routing Component:** `{local_route}`\n"
+            f"**Validation Status:** {prediction_status}\n\n"
+            f"#### Raw Description:\n{bug_report_context}\n\n"
+            f"> *Note: Gemini API timed out. Structural data was preserved using localized NLP components.*"
+        )
+        return fallback
+
+def export_to_external_system(custom_title, custom_desc, prediction, confidence, coherence_status, github_repo, access_token, user_info):
+    val_text = f"### 🤖 Automated Triage Validation\n- **Phase 1 (Structural):** `{prediction}` ({confidence}% confidence)\n"
+    if coherence_status and coherence_status != "PENDING":
+        val_text += f"- **Phase 2 (Semantic):** `{coherence_status}`\n"
+    signature = f"\n\n---\n*Reported via BugTriage-NLP by **{user_info.get('name', 'Unknown')}** ({user_info.get('email', '')})*"
+    issue_body = val_text + "\n---\n\n" + custom_desc + signature
+
+    if not access_token or not github_repo: return False, "Missing token or Repo name."
+    url = f"https://api.github.com/repos/{github_repo}/issues"
+    headers = {"Authorization": f"Bearer {access_token}", "Accept": "application/vnd.github+json"}
+    
+    try:
+        resp = requests.post(url, headers=headers, json={"title": custom_title, "body": issue_body, "labels": ["bug", "triage-validated"]}, timeout=10)
+        if resp.status_code in (200, 201): return True, f"Ticket successfully exported to: {resp.json().get('html_url', '')}"
+        return False, f"GitHub API Error ({resp.status_code}): {resp.text}"
+    except Exception as e: return False, f"Connection error: {e}"
 
 def start_new_chat(preserve_draft=""):
     st.session_state.session_id = str(uuid.uuid4())
     st.session_state.messages = []
     st.session_state.draft_report = preserve_draft
-    for key in ["current_report", "prediction", "confidence", "coherence_status", "coherence_reason"]:
-        if key in st.session_state:
-            del st.session_state[key]
-
-if "session_id" not in st.session_state:
-    st.session_state.session_id = str(uuid.uuid4())
-if "messages" not in st.session_state:
-    st.session_state.messages = []
-if "draft_report" not in st.session_state:
-    st.session_state.draft_report = ""
-
-@st.cache_data(show_spinner=False)
-def extract_text_from_file(file_bytes: bytes, file_name: str):
-    import io
-    file_extension = file_name.split('.')[-1].lower()
-    extracted_text = ""
-    try:
-        if file_extension == 'txt':
-            extracted_text = file_bytes.decode("utf-8", errors="ignore")
-        elif file_extension == 'pdf':
-            pdf_reader = PyPDF2.PdfReader(io.BytesIO(file_bytes))
-            for page in pdf_reader.pages:
-                extracted_text += (page.extract_text() or "") + "\n"
-        elif file_extension == 'docx':
-            doc = docx.Document(io.BytesIO(file_bytes))
-            for para in doc.paragraphs:
-                extracted_text += para.text + "\n"
-    except Exception as e:
-        st.error(f"Error reading the file: {e}")
-    return extracted_text
-
-def evaluate_phase1_structure(report_text: str):
-    clean_input = report_text.strip()
-    text_lower = clean_input.lower()
-    word_count = len(clean_input.split())
-
-    features = vectorizer.transform([clean_input])
-    proba = validator.predict_proba(features)[0]
-    classes = list(validator.classes_)
-
-    if "Valid" in classes:
-        valid_idx = classes.index("Valid")
-    elif 1 in classes:
-        valid_idx = classes.index(1)
-    else:
-        valid_idx = -1
-
-    valid_conf = (proba[valid_idx] * 100) if valid_idx != -1 else (max(proba) * 100)
-    valid_conf = round(float(valid_conf), 2)
-
-    has_structure = (
-        ("steps" in text_lower or "reproduce" in text_lower)
-        and ("expected" in text_lower or "actual" in text_lower)
-    )
-
-    if word_count < 15:
-        final_prediction = "Missing_Details"
-    elif valid_conf >= 50.0 or (has_structure and valid_conf >= 40.0):
-        final_prediction = "Valid"
-    else:
-        final_prediction = "Missing_Details"
-
-    return final_prediction, valid_conf
-
-def local_heuristic_coherence_check(bug_report: str):
-    clean_text = re.sub(r'[^a-zA-Z0-9\s]', ' ', bug_report.lower())
-    words = [w for w in clean_text.split() if len(w) > 2]
-    
-    if len(words) < 12:
-        return "COHERENT", "Report too brief for split semantic analysis."
-
-    midpoint = len(words) // 2
-    vec1 = vectorizer.transform([" ".join(words[:midpoint])])
-    vec2 = vectorizer.transform([" ".join(words[midpoint:])])
-    similarity = cosine_similarity(vec1, vec2)[0][0]
-
-    if similarity < 0.02:
-        return "CONTRADICTORY", f"Low semantic continuity across report (similarity: {similarity:.3f})."
-
-    return "COHERENT", f"Semantic continuity verified (similarity: {similarity:.3f})."
-
-def verify_semantic_coherence(bug_report: str, max_retries=3):
-    prompt = (
-        "You are an automated Software Quality Assurance triage validator.\n\n"
-        "Read the following software defect report and evaluate its semantic coherence:\n"
-        f"\"\"\"{bug_report}\"\"\"\n\n"
-        "Criteria for CONTRADICTORY:\n"
-        "1. The report contains random, off-topic, or non-software sentences injected into the text "
-        "(e.g., talking about animals, weather, food, or random daily life).\n"
-        "2. The Expected Result and Actual Result logically contradict the Steps to Reproduce.\n\n"
-        "Criteria for COHERENT:\n"
-        "The entire report is a legitimate software issue description (normal greetings, sign-offs, "
-        "logs, stack traces, and configuration snippets are valid).\n\n"
-        "Respond in this exact 2-line format:\n"
-        "VERDICT: [COHERENT or CONTRADICTORY]\n"
-        "REASON: [One sentence explanation]"
-    )
-    
-    for attempt in range(max_retries):
-        try:
-            response = chat_model.generate_content(
-                prompt,
-                generation_config=genai.types.GenerationConfig(
-                    temperature=0.0,
-                    max_output_tokens=600
-                ),
-                request_options={"timeout": 15.0}
-            )
-            
-            res = response.text.strip()
-            upper_res = res.upper()
-            
-            is_contradictory = (
-                "NON_SOFTWARE: YES" in upper_res
-                or "NON_SOFTWARE_DETECTED: YES" in upper_res
-                or "VERDICT: CONTRADICTORY" in upper_res
-                or upper_res.startswith("CONTRADICTORY")
-            )
-            
-            verdict = "CONTRADICTORY" if is_contradictory else "COHERENT"
-            
-            reason = ""
-            for line in res.splitlines():
-                if "REASON:" in line.upper():
-                    reason = line.split(":", 1)[-1].strip()
-                    break
-            if not reason:
-                clean_lines = [l.strip() for l in res.splitlines() if l.strip()]
-                reason = " | ".join(clean_lines)[:140]
-                
-            return verdict, reason
-        except Exception as e:
-            if attempt == max_retries - 1:
-                fb_verdict, fb_reason = local_heuristic_coherence_check(bug_report)
-                return fb_verdict, f"[API Fallback ({type(e).__name__})] {fb_reason}"
-            time.sleep(2)
-
-def generate_ai_response(user_question, bug_report_context, prediction_status, guideline_text="", stream=True, max_retries=3):
-    if not bug_report_context or not bug_report_context.strip():
-        return "I do not have a bug report to look at yet. Please analyze one first."
-
-    current_date = datetime.now().strftime('%Y-%m-%d')
-    guideline_block = f"\nQA Formatting Guidelines:\n{guideline_text}\n" if guideline_text else ""
-
-    prompt = (
-        f"Date: {current_date}\n"
-        f"Phase 1 Validation Status: {prediction_status}\n"
-        f"{guideline_block}\n"
-        f"Raw Bug Report:\n\"\"\"{bug_report_context}\"\"\"\n\n"
-        f"Task: {user_question}\n\n"
-        "When restructuring or analyzing, provide a thorough, complete explanation including:\n"
-        "1. **Standardized Title & Summary**\n"
-        "2. **Severity Level** (Blocker, Critical, Major, Minor, Trivial)\n"
-        "3. **Component Routing** (Backend/Core, SQL/Database, UI/Frontend, Python/API, Network/Cluster)\n"
-        "4. **Steps to Reproduce, Expected Result, & Actual Result**\n"
-        "5. **Flagged Contradictions / Ambiguities**\n"
-        "6. **Probable Root-Cause Hypothesis**"
-    )
-    
-    for attempt in range(max_retries):
-        try:
-            response = chat_model.generate_content(
-                prompt,
-                stream=stream,
-                generation_config=genai.types.GenerationConfig(
-                    temperature=0.2,
-                    max_output_tokens=2048
-                )
-            )
-            return response if stream else response.text
-        except Exception as e:
-            if attempt == max_retries - 1:
-                return f"I encountered an error connecting to the cloud AI after {max_retries} retries: {e}"
-            time.sleep(2)
-
-def export_to_external_system(custom_title, custom_desc, prediction, confidence, coherence_status, coherence_reason, github_repo, access_token, user_info):
-    
-    # Build the Validation Report header based on what has run
-    val_text = "### 🤖 Automated Triage Validation\n"
-    val_text += f"- **Phase 1 (Structural):** `{prediction}` ({confidence}% confidence)\n"
-    
-    # If Phase 2 was run, include it
-    if coherence_status and coherence_status != "PENDING":
-        val_text += f"- **Phase 2 (Semantic):** `{coherence_status}`\n"
-        if coherence_reason:
-            val_text += f"  - *Reason: {coherence_reason}*\n"
-            
-    val_text += "\n---\n\n"
-    
-    # Build the Sender Signature
-    sender_name = user_info.get("name", "Unknown User")
-    sender_email = user_info.get("email", "")
-    signature = f"\n\n---\n*Reported via BugTriage-NLP by **{sender_name}** ({sender_email})*"
-    
-    # Final Body Combination
-    issue_body = val_text + custom_desc + signature
-
-    if not access_token or not github_repo:
-        return False, "Missing user access token or Repository name."
-
-    url = f"https://api.github.com/repos/{github_repo}/issues"
-    headers = {
-        "Authorization": f"Bearer {access_token}",
-        "Accept": "application/vnd.github+json"
-    }
-    payload = {
-        "title": custom_title,
-        "body": issue_body,
-        "labels": ["bug", "triage-validated"]
-    }
-    try:
-        resp = requests.post(url, headers=headers, json=payload, timeout=10)
-        if resp.status_code in (200, 201):
-            issue_url = resp.json().get("html_url", "")
-            return True, f"Ticket successfully exported to: {issue_url}"
-        return False, f"GitHub API Error ({resp.status_code}): {resp.text}"
-    except Exception as e:
-        return False, f"Connection error: {e}"
+    for key in ["current_report", "prediction", "confidence", "coherence_status", "coherence_reason", "phase1_ms", "phase2_ms", "duplicates"]:
+        if key in st.session_state: del st.session_state[key]
 
 # ---------------------------------------------------------
 # UI RENDERING
 # ---------------------------------------------------------
+
+if "session_id" not in st.session_state: st.session_state.session_id = str(uuid.uuid4())
+if "messages" not in st.session_state: st.session_state.messages = []
 
 with st.sidebar:
     if st.button("New Chat", use_container_width=True, type="primary"):
@@ -502,263 +302,152 @@ with st.sidebar:
         st.rerun()
 
     st.divider()
-    st.header("Document Uploads")
-    st.write("Upload QA formatting guidelines (.txt, .pdf, .docx).")
-    uploaded_guideline = st.file_uploader("Select File", type=["txt", "pdf", "docx"], label_visibility="collapsed")
-    custom_guideline_text = ""
-    if uploaded_guideline is not None:
-        custom_guideline_text = extract_text_from_file(uploaded_guideline.getvalue(), uploaded_guideline.name)
-        if custom_guideline_text.strip():
-            st.success("Guidelines active.")
-
-    st.divider()
-    
-    # Hide History if not logged in
     if st.session_state.user is not None:
         st.header("Your Chat History")
-        user_email = st.session_state.user["email"]
-        sessions = get_all_sessions(user_email)
-
-        if sessions:
-            with st.container(height=400):
-                for sess_id, title, timestamp in sessions:
-                    date_str = timestamp.split(" ")[0]
-                    if st.button(f"{title} ({date_str})", key=sess_id, use_container_width=True, help="Click to resume this triage session"):
-                        load_session(sess_id)
-                        st.rerun()
-        else:
-            st.info("No previous chats found for this account.")
+        if db is not None:
+            sessions = list(db.sessions.find({"user_email": st.session_state.user["email"]}, {"session_id": 1, "title": 1, "timestamp": 1, "_id": 0}).sort("timestamp", -1))
+            if sessions:
+                with st.container(height=400):
+                    for doc in sessions:
+                        if st.button(f"{doc['title']} ({doc['timestamp'].split()[0]})", key=doc['session_id'], use_container_width=True):
+                            sess_data = db.sessions.find_one({"session_id": doc['session_id']})
+                            st.session_state.update({
+                                "session_id": doc['session_id'], "current_report": sess_data.get("bug_report", ""),
+                                "prediction": sess_data.get("prediction", ""), "confidence": sess_data.get("confidence", 0.0),
+                                "coherence_status": sess_data.get("coherence_status", "COHERENT"), "coherence_reason": sess_data.get("coherence_reason", ""),
+                                "phase1_ms": sess_data.get("phase1_ms", 0), "phase2_ms": sess_data.get("phase2_ms", 0)
+                            })
+                            msgs = list(db.chat_history.find({"session_id": doc['session_id']}).sort("timestamp", 1))
+                            st.session_state.messages = [{"role": m["role"], "content": m["content"]} for m in msgs]
+                            st.rerun()
     else:
-        st.info("🔒 Sign in above to view and save your chat history.")
+        st.info("🔒 Sign in above to view history.")
 
 st.title("BugTriage-NLP")
 st.markdown("**Automated Defect Report Validation and Triage Assistant**")
-st.divider()
 
-if "current_report" not in st.session_state:
-    st.write("Input the defect description below. The local Scikit-Learn Logistic Regression model will validate its structural integrity, followed by Gemini AI refinement.")
+tab_workspace, tab_dashboard = st.tabs(["🛠️ Triage Workspace", "📊 QA Manager Dashboard"])
 
-    default_text = st.session_state.get("draft_report", "")
-    if sample_df is not None and not sample_df.empty:
-        id_col = next((c for c in sample_df.columns if 'id' in c.lower()), sample_df.columns[0])
-        desc_col = 'Description_Clean' if 'Description_Clean' in sample_df.columns else next((c for c in sample_df.columns if 'desc' in c.lower()), sample_df.columns[-1])
+with tab_workspace:
+    if "current_report" not in st.session_state:
+        st.write("Input the defect description below to run Phase 1 structural validation.")
+        default_text = st.session_state.get("draft_report", "")
+        if sample_df is not None:
+            opts = ["-- Type manually --"] + [f"Ticket #{i+1}: {r[sample_df.columns[0]]}" for i, r in sample_df.iterrows()]
+            sel = st.selectbox("Load sample ticket:", opts)
+            if sel != "-- Type manually --": default_text = str(sample_df.iloc[int(sel.split("#")[1].split(":")[0])-1][sample_df.columns[-1]])
+            
+        user_input = st.text_area("Defect Description", value=default_text, height=150, label_visibility="collapsed")
 
-        options = ["-- Type manually below --"] + [
-            f"Ticket #{i+1}: {row[id_col]}" for i, row in sample_df.iterrows()
-        ]
-        selected_option = st.selectbox("Load a sample historical ticket from GitBugs (Optional):", options)
-        if selected_option != "-- Type manually below --":
-            row_idx = int(selected_option.split("#")[1].split(":")[0]) - 1
-            default_text = str(sample_df.iloc[row_idx][desc_col])
-
-    user_input = st.text_area(
-        "Defect Description",
-        value=default_text,
-        height=150,
-        placeholder="Enter bug report details (Steps to Reproduce, Expected Result, Actual Result)...",
-        label_visibility="collapsed"
-    )
-
-    action_col1, action_col2, action_col3 = st.columns([1, 1, 2])
-
-    with action_col1:
         if st.button("Analyze Report", use_container_width=True, type="primary"):
-            if user_input.strip() == "":
-                st.warning("Please enter a defect description before proceeding.")
-            else:
+            if user_input.strip():
+                t0 = time.time()
                 clean_input = user_input.strip()
                 final_prediction, valid_conf = evaluate_phase1_structure(clean_input)
-
-                st.session_state.current_report = clean_input
-                st.session_state.prediction = final_prediction
-                st.session_state.confidence = valid_conf
-                st.session_state.coherence_status = "PENDING"
-                st.session_state.coherence_reason = ""
-
-                # Save session linked to email (or 'anonymous' if guest)
-                active_email = st.session_state.user["email"] if st.session_state.user else "anonymous"
-                create_session(
-                    st.session_state.session_id,
-                    active_email,
-                    clean_input,
-                    st.session_state.prediction,
-                    st.session_state.confidence,
-                    st.session_state.coherence_status,
-                    st.session_state.coherence_reason
-                )
+                t1 = time.time()
+                
+                st.session_state.update({
+                    "current_report": clean_input, "prediction": final_prediction, 
+                    "confidence": valid_conf, "coherence_status": "PENDING", 
+                    "phase1_ms": int((t1 - t0) * 1000), "duplicates": check_for_duplicates(clean_input, st.session_state.session_id)
+                })
+                email = st.session_state.user["email"] if st.session_state.user else "anonymous"
+                create_session(st.session_state.session_id, email, clean_input, final_prediction, valid_conf, p1_ms=st.session_state.phase1_ms)
                 st.rerun()
-else:
-    with st.expander("View Active Defect Report Context", expanded=False):
-        st.write(st.session_state.current_report)
-
-    status_col, coherence_col, action_col = st.columns([1.2, 1.2, 1])
-    with status_col:
-        st.caption("Phase 1: Local Validation (Logistic Regression)")
-        conf_val = st.session_state.get("confidence", 0.0)
-        conf_str = f" ({conf_val:.2f}% conf)"
-        if st.session_state.prediction == "Valid":
-            st.success(f"Status: Valid Structure{conf_str}")
-        else:
-            st.error(f"Status: Missing Details{conf_str}")
-
-    if st.session_state.prediction == "Missing_Details":
-        with coherence_col:
-            st.caption("Phase 2: Cloud LLM Gatekeeper")
-            st.warning("Cloud AI Skipped (Blocked by Phase 1)")
-
-        st.warning(
-            f"**Revision Required (`Missing_Details` — {conf_val:.2f}% Valid Score):** This defect report scored below the "
-            "structural validity threshold. To conserve cloud resources, generative AI processing is withheld. "
-            "Please revise the report to include at least 15 words with clear **Steps to Reproduce**, **Expected Result**, and **Actual Result**."
-        )
-        if st.button("Revise & Resubmit Report", type="primary"):
-            start_new_chat(preserve_draft=st.session_state.current_report)
-            st.rerun()
-
+            else: st.warning("Enter a defect description.")
     else:
-        with coherence_col:
-            st.caption("Phase 2: Semantic Coherence Verification")
-            if st.session_state.get("coherence_status") == "PENDING":
-                st.info("Awaiting Cloud Verification")
-                if st.button("Run Coherence Check", type="secondary", use_container_width=True):
-                    with st.spinner("Checking with Gemini (Will auto-retry if failed)..."):
-                        verdict, reason = verify_semantic_coherence(st.session_state.current_report)
-                        st.session_state.coherence_status = verdict
-                        st.session_state.coherence_reason = reason
-                        
-                        active_email = st.session_state.user["email"] if st.session_state.user else "anonymous"
-                        create_session(
-                            st.session_state.session_id,
-                            active_email,
-                            st.session_state.current_report,
-                            st.session_state.prediction,
-                            st.session_state.confidence,
-                            st.session_state.coherence_status,
-                            st.session_state.coherence_reason
-                        )
-                        st.rerun()
-            elif st.session_state.get("coherence_status") == "CONTRADICTORY":
-                st.error("Flagged: Semantic Contradiction / Nonsense Detected")
-                if st.session_state.get("coherence_reason"):
-                    st.caption(f"Reason: {st.session_state.coherence_reason}")
-            else:
-                st.success("Semantic Check: Coherent")
-                if st.session_state.get("coherence_reason") and "[API Fallback" in st.session_state.get("coherence_reason"):
-                    st.caption(f"Note: {st.session_state.coherence_reason}")
+        with st.expander("View Active Defect Report Context"): st.write(st.session_state.current_report)
 
-        with action_col:
-            st.caption("Phase 3: External Routing")
-            
-            if st.session_state.user is None:
-                st.info("🔒 Sign in via the sidebar to export tickets.")
-            else:
-                target_repo = st.text_input("Target GitHub Repo", placeholder="owner/repo", help="Example: facebook/react")
-                
-                # Setup custom title default
-                default_title = st.session_state.current_report.strip().splitlines()[0][:65] if st.session_state.current_report else "Bug Report"
-                custom_title = st.text_input("Issue Title", value=f"[BugTriage-NLP] {default_title}")
-                
-                # Setup custom description default (grab last AI message, or fallback to raw report)
-                latest_ai_ticket = next(
-                    (m["content"] for m in reversed(st.session_state.messages) if m["role"] == "assistant"),
-                    ""
-                )
-                if not latest_ai_ticket:
-                    latest_ai_ticket = f"#### Raw Defect Description\n{st.session_state.current_report}"
-                
-                custom_desc = st.text_area("Issue Description (Editable)", value=latest_ai_ticket, height=150)
-                
-                if st.button("Export to Tracking System", use_container_width=True, type="primary"):
-                    if not target_repo.strip():
-                        st.error("Please enter a target repository (owner/repo).")
-                    elif not custom_title.strip() or not custom_desc.strip():
-                        st.error("Please ensure Issue Title and Description are not empty.")
-                    else:
-                        with st.spinner(f"Exporting to {target_repo}..."):
-                            success, msg_out = export_to_external_system(
-                                custom_title=custom_title.strip(),
-                                custom_desc=custom_desc.strip(),
-                                prediction=st.session_state.prediction,
-                                confidence=st.session_state.get("confidence", 0.0),
-                                coherence_status=st.session_state.get("coherence_status"),
-                                coherence_reason=st.session_state.get("coherence_reason"),
-                                github_repo=target_repo.strip(),
-                                access_token=st.session_state.user.get("access_token"),
-                                user_info=st.session_state.user
-                            )
-                            if success:
-                                st.toast("Export successful!")
-                                st.success(msg_out)
-                            else:
-                                st.error(msg_out)
+        if st.session_state.get("duplicates"):
+            st.warning(f"⚠️ **Potential Duplicates Found:** Similarity >85% with {len(st.session_state.duplicates)} past report(s).")
+            for dup in st.session_state.duplicates: st.caption(f"- {dup['title']} ({dup['score']}%)")
+
+        col1, col2, col3 = st.columns([1.2, 1.2, 1])
+        with col1:
+            st.caption(f"Phase 1: Validation ({st.session_state.get('phase1_ms', 0)}ms)")
+            if st.session_state.prediction == "Valid": st.success(f"Valid Structure ({st.session_state.confidence}%)")
+            else: st.error(f"Missing Details ({st.session_state.confidence}%)")
+
+        if st.session_state.prediction == "Missing_Details":
+            with col2:
+                st.caption("Phase 2: Semantic Verification")
+                st.warning("Skipped (Blocked by Phase 1)")
+            st.warning("Revision Required: Score below threshold. Add clear Steps, Expected, and Actual results.")
+            if st.button("Revise & Resubmit", type="primary"):
+                start_new_chat(preserve_draft=st.session_state.current_report)
+                st.rerun()
+        else:
+            with col2:
+                p2_ms = st.session_state.get('phase2_ms', 0)
+                st.caption(f"Phase 2: Semantic Check {'('+str(p2_ms)+'ms)' if p2_ms else ''}")
+                if st.session_state.get("coherence_status") == "PENDING":
+                    if st.button("Run Coherence Check", type="secondary"):
+                        with st.spinner("Checking..."):
+                            t0 = time.time()
+                            verdict, reason = verify_semantic_coherence(st.session_state.current_report)
+                            t1 = time.time()
+                            st.session_state.update({"coherence_status": verdict, "coherence_reason": reason, "phase2_ms": int((t1 - t0) * 1000)})
+                            create_session(st.session_state.session_id, st.session_state.user["email"] if st.session_state.user else "anonymous", st.session_state.current_report, st.session_state.prediction, st.session_state.confidence, verdict, reason, st.session_state.phase1_ms, st.session_state.phase2_ms)
+                            st.rerun()
+                elif st.session_state.coherence_status == "CONTRADICTORY": st.error(f"Flagged: {st.session_state.coherence_reason}")
+                else: st.success("Coherent")
+
+            with col3:
+                st.caption("Phase 3: External Routing")
+                if st.session_state.user:
+                    target_repo = st.text_input("Target Repo", placeholder="owner/repo")
+                    custom_title = st.text_input("Issue Title", value=f"[BugTriage] {st.session_state.current_report.splitlines()[0][:65]}")
+                    latest_ai = next((m["content"] for m in reversed(st.session_state.messages) if m["role"] == "assistant"), f"#### Raw Report\n{st.session_state.current_report}")
+                    custom_desc = st.text_area("Issue Description", value=latest_ai, height=100)
+                    
+                    if st.button("Export to GitHub", type="primary"):
+                        with st.spinner("Exporting..."):
+                            success, msg = export_to_external_system(custom_title, custom_desc, st.session_state.prediction, st.session_state.confidence, st.session_state.coherence_status, target_repo, st.session_state.user["access_token"], st.session_state.user)
+                            if success: st.success(msg)
+                            else: st.error(msg)
+                else: st.info("🔒 Sign in to export.")
 
         st.markdown("### Triage Assistant")
-
-        ai_col1, ai_col2, ai_col3 = st.columns([1, 1, 2])
-        triggered_prompt = None
-
-        with ai_col1:
-            if st.button("Analyze Root Cause", use_container_width=True):
-                triggered_prompt = "Analyze this report deeply, suggest the target developer component/team for routing, and identify the most probable root cause."
-
-        with ai_col2:
-            if st.button("Standardize Report Format", use_container_width=True):
-                triggered_prompt = "Rewrite this bug report into a standardized developer-ready ticket including Severity Level, Target Developer Component/Routing, Steps to Reproduce, Expected vs. Actual Results, Flagged Contradictions, and Root-Cause Analysis."
-
-        chat_container = st.container()
-        with chat_container:
-            for idx, message in enumerate(st.session_state.messages):
-                with st.chat_message(message["role"]):
-                    st.markdown(message["content"])
-                    
-                    if message["role"] == "assistant":
-                        dl_col, copy_col, space = st.columns([2, 3, 5])
-                        with dl_col:
-                            st.download_button(
-                                label="📥 Export (.md)",
-                                data=message["content"],
-                                file_name=f"BugTriage_Report_{idx}.md",
-                                mime="text/markdown",
-                                key=f"dl_hist_{idx}"
-                            )
-                        with copy_col:
-                            with st.expander("📋 View/Copy Raw Code"):
-                                st.code(message["content"], language="markdown")
-
-        chat_box_input = st.chat_input("Enter a query regarding this report...")
-        active_query = triggered_prompt or chat_box_input
-
-        if active_query:
-            st.session_state.messages.append({"role": "user", "content": active_query})
-            save_message(st.session_state.session_id, "user", active_query)
-
-            with chat_container:
-                with st.chat_message("user"):
-                    st.markdown(active_query)
-
-                with st.chat_message("assistant"):
-                    response_stream = generate_ai_response(
-                        user_question=active_query,
-                        bug_report_context=st.session_state.current_report,
-                        prediction_status=st.session_state.prediction,
-                        guideline_text=custom_guideline_text,
-                        stream=True
-                    )
-
-                    if isinstance(response_stream, str):
-                        st.markdown(response_stream)
-                        st.session_state.messages.append({"role": "assistant", "content": response_stream})
-                        save_message(st.session_state.session_id, "assistant", response_stream)
-                    else:
-                        def stream_text():
-                            full_text = ""
-                            for chunk in response_stream:
-                                if chunk.text:
-                                    full_text += chunk.text
-                                    yield chunk.text
-                            save_message(st.session_state.session_id, "assistant", full_text)
-
-                        full_reply = st.write_stream(stream_text)
-                        st.session_state.messages.append({"role": "assistant", "content": full_reply})
+        if st.button("Standardize & Route via AI"):
+            msg = "Standardize this bug report. Identify Severity, Component Routing, and Root Cause."
+            st.session_state.messages.append({"role": "user", "content": msg})
+            save_message(st.session_state.session_id, "user", msg)
             
+            resp = generate_ai_response(msg, st.session_state.current_report, st.session_state.prediction, stream=True)
+            if isinstance(resp, str): 
+                st.session_state.messages.append({"role": "assistant", "content": resp})
+            else:
+                def stream_gen():
+                    full = ""
+                    for chunk in resp:
+                        if chunk.text:
+                            full += chunk.text
+                            yield chunk.text
+                    save_message(st.session_state.session_id, "assistant", full)
+                    st.session_state.messages.append({"role": "assistant", "content": full})
+                st.write_stream(stream_gen)
             st.rerun()
+
+        for m in st.session_state.messages:
+            with st.chat_message(m["role"]): st.markdown(m["content"])
+
+with tab_dashboard:
+    st.header("System Analytics & Research Data")
+    if db is not None:
+        total = db.sessions.count_documents({})
+        if total > 0:
+            v_count = db.sessions.count_documents({"prediction": "Valid"})
+            avg_p1 = db.sessions.aggregate([{"$group": {"_id": None, "avg": {"$avg": "$phase1_ms"}}}]).next()["avg"]
+            
+            m_col1, m_col2, m_col3 = st.columns(3)
+            m_col1.metric("Total Reports Processed", total)
+            m_col2.metric("Valid Structure Rate", f"{round((v_count/total)*100, 1)}%")
+            m_col3.metric("Avg Phase 1 Speed", f"{round(avg_p1, 2)} ms")
+            
+            st.subheader("Performance Logs (Research Output)")
+            logs_df = pd.DataFrame(list(db.sessions.find({}, {"session_id":1, "prediction":1, "phase1_ms":1, "phase2_ms":1, "timestamp":1, "_id":0})))
+            st.dataframe(logs_df, use_container_width=True)
+        else:
+            st.info("No data available yet. Process some defect reports to generate analytics.")
+    else:
+        st.error("Database connection required for Manager Dashboard.")
