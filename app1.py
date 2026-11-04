@@ -13,6 +13,7 @@ import google.generativeai as genai
 from pymongo import MongoClient
 import certifi
 from sklearn.metrics.pairwise import cosine_similarity
+from sklearn.feature_extraction.text import TfidfVectorizer
 from authlib.integrations.requests_client import OAuth2Session
 
 import PyPDF2
