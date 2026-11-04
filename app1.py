@@ -34,7 +34,7 @@ SAMPLE_CSV_PATH = find_project_file("spark_sample_30.csv")
 st.set_page_config(page_title="BugTriage-NLP", layout="wide", initial_sidebar_state="expanded")
 
 # ---------------------------------------------------------
-# CUSTOM CSS FOR GREEN BUTTONS
+# CUSTOM CSS
 # ---------------------------------------------------------
 st.markdown("""
     <style>
@@ -437,12 +437,13 @@ with tab_dashboard:
         total = db.sessions.count_documents({})
         if total > 0:
             v_count = db.sessions.count_documents({"prediction": "Valid"})
-            avg_p1 = db.sessions.aggregate([{"$group": {"_id": None, "avg": {"$avg": "$phase1_ms"}}}]).next()["avg"]
+            avg_p1_result = db.sessions.aggregate([{"$group": {"_id": None, "avg": {"$avg": "$phase1_ms"}}}]).next()["avg"]
+            avg_p1_display = round(avg_p1_result, 2) if avg_p1_result is not None else 0
             
             m_col1, m_col2, m_col3 = st.columns(3)
             m_col1.metric("Total Reports Processed", total)
             m_col2.metric("Valid Structure Rate", f"{round((v_count/total)*100, 1)}%")
-            m_col3.metric("Avg Phase 1 Speed", f"{round(avg_p1, 2)} ms")
+            m_col3.metric("Avg Phase 1 Speed", f"{avg_p1_display} ms")
             
             st.subheader("Performance Logs (Research Output)")
             logs_df = pd.DataFrame(list(db.sessions.find({}, {"session_id":1, "prediction":1, "phase1_ms":1, "phase2_ms":1, "timestamp":1, "_id":0})))
