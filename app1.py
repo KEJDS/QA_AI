@@ -268,8 +268,8 @@ def verify_semantic_coherence(bug_report: str):
                 
         return verdict, reason
     except Exception as e:
-        return "COHERENT", f"[API Fallback] Local check assumed coherent due to network timeout ({type(e).__name__})."
-
+    return "UNVERIFIED", f"Cloud AI offline ({type(e).__name__}). Manual semantic review required."
+    
 def generate_ai_response(user_question, bug_report_context, prediction_status, guideline_text="", stream=True):
     if not bug_report_context.strip(): return "I do not have a bug report to look at yet."
     prompt = f"Date: {datetime.now().strftime('%Y-%m-%d')}\nStatus: {prediction_status}\nRaw Report:\n\"\"\"{bug_report_context}\"\"\"\nTask: {user_question}\nEnsure components: Severity, Routing, Steps, Root Cause."
