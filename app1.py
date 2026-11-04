@@ -448,17 +448,13 @@ def generate_ai_response(user_question, bug_report_context, prediction_status, g
                 return f"I encountered an error connecting to the cloud AI after {max_retries} retries: {e}"
             time.sleep(2)
 
-def export_to_external_system(bug_report, standardized_body, prediction, confidence, coherence_status, coherence_reason, github_repo, access_token):
-    clean_title = bug_report.strip().splitlines()[0][:65]
-    issue_title = f"[BugTriage-NLP] {clean_title}"
+def export_to_external_system(custom_title, custom_desc, prediction, confidence, coherence_status, coherence_reason, github_repo, access_token, user_info):
     
-    # -------------------------------------------------------------
-    # NEW: Build the Validation Report header based on what has run
-    # -------------------------------------------------------------
+    # Build the Validation Report header based on what has run
     val_text = "### 🤖 Automated Triage Validation\n"
     val_text += f"- **Phase 1 (Structural):** `{prediction}` ({confidence}% confidence)\n"
     
-    # If Phase 2 was run, include it. If it's still PENDING, skip it.
+    # If Phase 2 was run, include it
     if coherence_status and coherence_status != "PENDING":
         val_text += f"- **Phase 2 (Semantic):** `{coherence_status}`\n"
         if coherence_reason:
@@ -466,8 +462,13 @@ def export_to_external_system(bug_report, standardized_body, prediction, confide
             
     val_text += "\n---\n\n"
     
-    # Prepend the validation text to the AI ticket (or the raw report if no AI ticket exists)
-    issue_body = val_text + (standardized_body if standardized_body else f"#### Raw Defect Description\n{bug_report}")
+    # Build the Sender Signature
+    sender_name = user_info.get("name", "Unknown User")
+    sender_email = user_info.get("email", "")
+    signature = f"\n\n---\n*Reported via BugTriage-NLP by **{sender_name}** ({sender_email})*"
+    
+    # Final Body Combination
+    issue_body = val_text + custom_desc + signature
 
     if not access_token or not github_repo:
         return False, "Missing user access token or Repository name."
@@ -478,7 +479,7 @@ def export_to_external_system(bug_report, standardized_body, prediction, confide
         "Accept": "application/vnd.github+json"
     }
     payload = {
-        "title": issue_title,
+        "title": custom_title,
         "body": issue_body,
         "labels": ["bug", "triage-validated"]
     }
@@ -653,25 +654,37 @@ else:
             else:
                 target_repo = st.text_input("Target GitHub Repo", placeholder="owner/repo", help="Example: facebook/react")
                 
+                # Setup custom title default
+                default_title = st.session_state.current_report.strip().splitlines()[0][:65] if st.session_state.current_report else "Bug Report"
+                custom_title = st.text_input("Issue Title", value=f"[BugTriage-NLP] {default_title}")
+                
+                # Setup custom description default (grab last AI message, or fallback to raw report)
+                latest_ai_ticket = next(
+                    (m["content"] for m in reversed(st.session_state.messages) if m["role"] == "assistant"),
+                    ""
+                )
+                if not latest_ai_ticket:
+                    latest_ai_ticket = f"#### Raw Defect Description\n{st.session_state.current_report}"
+                
+                custom_desc = st.text_area("Issue Description (Editable)", value=latest_ai_ticket, height=150)
+                
                 if st.button("Export to Tracking System", use_container_width=True, type="primary"):
                     if not target_repo.strip():
                         st.error("Please enter a target repository (owner/repo).")
+                    elif not custom_title.strip() or not custom_desc.strip():
+                        st.error("Please ensure Issue Title and Description are not empty.")
                     else:
                         with st.spinner(f"Exporting to {target_repo}..."):
-                            latest_ai_ticket = next(
-                                (m["content"] for m in reversed(st.session_state.messages) if m["role"] == "assistant"),
-                                ""
-                            )
-                            # UPDATE: Pass all validation variables into the export function
                             success, msg_out = export_to_external_system(
-                                bug_report=st.session_state.current_report,
-                                standardized_body=latest_ai_ticket,
+                                custom_title=custom_title.strip(),
+                                custom_desc=custom_desc.strip(),
                                 prediction=st.session_state.prediction,
                                 confidence=st.session_state.get("confidence", 0.0),
                                 coherence_status=st.session_state.get("coherence_status"),
                                 coherence_reason=st.session_state.get("coherence_reason"),
                                 github_repo=target_repo.strip(),
-                                access_token=st.session_state.user.get("access_token")
+                                access_token=st.session_state.user.get("access_token"),
+                                user_info=st.session_state.user
                             )
                             if success:
                                 st.toast("Export successful!")
