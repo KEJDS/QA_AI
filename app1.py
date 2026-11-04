@@ -369,6 +369,16 @@ def verify_semantic_coherence(bug_report: str, use_gemini=False):
     relevance, matched = calculate_relevance_score(text)
     similarity = calculate_sentence_similarity(text)
     contradictions = detect_contradictions(text)
+    
+    # --- UPGRADE: LOCAL SURREALISM & ABSURDITY DETECTOR ---
+    absurd_patterns = [
+        r"\b(?:toaster|bread|pumpernickel|celery|potato|soup|seagulls|purple|caramelize|origami|swan)\b",
+        r"\b(?:smells like|tastes like|singing|humming|stare intensely)\b",
+        r"\b(?:dad should finally come back|867-5309)\b",
+        r"\b(?:windows 1998 se)\b"
+    ]
+    absurd_hits = [p for p in absurd_patterns if re.search(p, lower)]
+    
     has_expected = _has_any(lower, EXPECTED_TERMS)
     has_actual = _has_any(lower, ACTUAL_TERMS)
     has_steps = _has_any(lower, STEP_TERMS)
@@ -379,7 +389,7 @@ def verify_semantic_coherence(bug_report: str, use_gemini=False):
         confidence += min(15, similarity * .15)
     if len(words) >= 30:
         confidence += 5
-    if contradictions:
+    if contradictions or absurd_hits:
         confidence = max(confidence, 75)
     confidence = round(min(95, confidence), 1)
 
@@ -388,6 +398,7 @@ def verify_semantic_coherence(bug_report: str, use_gemini=False):
         "contradictions": contradictions, "matched_terms": matched,
         "word_count": len(words), "has_steps": has_steps,
         "has_expected": has_expected, "has_actual": has_actual,
+        "absurd_hits": len(absurd_hits)
     }
 
     if use_gemini and chat_model is not None:
@@ -395,7 +406,7 @@ def verify_semantic_coherence(bug_report: str, use_gemini=False):
             "You are a zero-tolerance software quality assurance gatekeeper.\n\n"
             f"Analyze this defect report word-for-word:\n\"\"\"{text}\"\"\"\n\n"
             "EVALUATION INSTRUCTIONS:\n"
-            "1. Scan the text for ANY slang, pop-culture references, jokes, song lyrics (e.g., 'up town funk you up'), or physically impossible events (e.g., 'the sun blew up'), no matter how much valid technical code is present.\n"
+            "1. Scan the text for ANY slang, pop-culture references, jokes, song lyrics, or physically impossible events (e.g., database caramelizing, browser made of bread), no matter how much valid technical code is present.\n"
             "2. If you find EVEN ONE such phrase, your verdict MUST be CONTRADICTORY.\n"
             "3. Only output COHERENT if 100% of the text describes a legitimate software problem or configuration.\n\n"
             "Respond EXACTLY in this format:\n"
@@ -421,7 +432,11 @@ def verify_semantic_coherence(bug_report: str, use_gemini=False):
             return verdict, reason, max(confidence, 85), metrics
         except Exception as exc:
             metrics["gemini_error"] = type(exc).__name__
-            return "UNVERIFIED", f"Cloud AI offline ({type(exc).__name__}). Manual semantic review required.", confidence, metrics
+            # Fall through to local rules if Gemini fails
+
+    # --- ENFORCED LOCAL CHECK FOR ABSURDITY ---
+    if absurd_hits:
+        return "CONTRADICTORY", "Local anomaly rule: Detected surreal, non-software, or physically impossible claims (e.g., food items used as hardware or impossible database side-effects).", confidence, metrics
 
     if contradictions:
         return "CONTRADICTORY", "Local contradiction rule(s): " + "; ".join(contradictions), confidence, metrics
