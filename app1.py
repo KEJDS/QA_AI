@@ -239,15 +239,14 @@ def evaluate_phase1_structure(report_text: str):
 
 def verify_semantic_coherence(bug_report: str):
     prompt = (
-        "You are a strict Software Quality Assurance anomaly detector.\n"
-        "Analyze the following defect report:\n"
+        "You are a strict QA anomaly detector. Your ONLY job is to catch hidden nonsense.\n\n"
+        "Analyze this defect report:\n"
         f"\"\"\"{bug_report}\"\"\"\n\n"
-        "STEP 1: Scan the text line-by-line. Identify if there are ANY non-software phrases, pop culture lyrics (e.g., 'up town funk you up'), or random jokes hidden in the text, regardless of how much valid technical code is present.\n"
-        "STEP 2: Determine the verdict. If ANY anomaly is found in Step 1, the verdict MUST be CONTRADICTORY. Otherwise, COHERENT.\n\n"
-        "Format your output EXACTLY like this:\n"
-        "ANOMALY: [List the exact suspicious phrase found, or state 'None']\n"
+        "STEP 1: Scan every line. Are there ANY song lyrics (like 'up town funk you up'), jokes, pop culture references, or random non-software phrases injected into the code or text?\n"
+        "STEP 2: If YES, you must reject it, regardless of how much valid technical data surrounds it.\n\n"
+        "Respond EXACTLY in this format:\n"
         "VERDICT: [COHERENT or CONTRADICTORY]\n"
-        "REASON: [Short explanation referencing the anomaly if found]"
+        "REASON: [Quote the exact hidden nonsense phrase you found, or state 'Semantic logic verified']"
     )
     try:
         response = chat_model.generate_content(
@@ -255,15 +254,16 @@ def verify_semantic_coherence(bug_report: str):
             generation_config=genai.types.GenerationConfig(temperature=0.0, max_output_tokens=600),
             request_options={"timeout": 15.0}
         )
-        res = response.text.strip().upper()
+        res = response.text.upper()
         
-        # Parse the forced Chain of Thought output
-        verdict = "CONTRADICTORY" if "VERDICT: CONTRADICTORY" in res else "COHERENT"
+        # Safer parsing: catches the verdict even if Gemini adds **markdown** bolding
+        verdict = "CONTRADICTORY" if "CONTRADICTORY" in res else "COHERENT"
         
         reason = "Semantic logic verified."
         for line in response.text.splitlines():
-            if line.upper().startswith("REASON:"):
-                reason = line.split(":", 1)[-1].strip()
+            if "REASON:" in line.upper():
+                # Extract the reason and strip any stray markdown
+                reason = line.split(":", 1)[-1].replace("**", "").strip()
                 break
                 
         return verdict, reason
