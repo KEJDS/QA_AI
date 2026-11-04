@@ -391,7 +391,7 @@ def verify_semantic_coherence(bug_report: str, use_gemini=False):
     }
 
     if use_gemini and chat_model is not None:
-       prompt = (
+        prompt = (
             "You are a zero-tolerance software quality assurance gatekeeper.\n\n"
             f"Analyze this defect report word-for-word:\n\"\"\"{text}\"\"\"\n\n"
             "EVALUATION INSTRUCTIONS:\n"
@@ -594,7 +594,6 @@ with tab_workspace:
                 if not gemini_available:
                     st.caption("Gemini unavailable — local checker is ready.")
 
-                # Button text changes depending on whether it has already run or needs a retry
                 btn_label = "Run Coherence Check" if st.session_state.get("coherence_status", "PENDING") == "PENDING" else "🔄 Re-run Coherence Check"
                 
                 if st.button(btn_label, type="secondary", use_container_width=True):
