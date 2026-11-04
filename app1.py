@@ -239,31 +239,30 @@ def evaluate_phase1_structure(report_text: str):
 
 def verify_semantic_coherence(bug_report: str):
     prompt = (
-        "You are a strict Software Quality Assurance gatekeeper.\n\n"
-        "Evaluate this defect report for semantic coherence:\n"
+        "You are a strict Software Quality Assurance anomaly detector.\n"
+        "Analyze the following defect report:\n"
         f"\"\"\"{bug_report}\"\"\"\n\n"
-        "CRITICAL RULES FOR 'CONTRADICTORY':\n"
-        "You MUST output CONTRADICTORY if there is EVEN ONE phrase, sentence, or lyric that is "
-        "non-software related, pop culture, random spam, or a joke, NO MATTER how much valid "
-        "technical code or context surrounds it. Look closely for hidden song lyrics or slang.\n\n"
-        "RULES FOR 'COHERENT':\n"
-        "The entire text is purely software-related (normal greetings/sign-offs are fine).\n\n"
-        "Format exactly as:\n"
-        "VERDICT: [COHERENT/CONTRADICTORY]\n"
-        "REASON: [Short explanation]"
+        "STEP 1: Scan the text line-by-line. Identify if there are ANY non-software phrases, pop culture lyrics (e.g., 'up town funk you up'), or random jokes hidden in the text, regardless of how much valid technical code is present.\n"
+        "STEP 2: Determine the verdict. If ANY anomaly is found in Step 1, the verdict MUST be CONTRADICTORY. Otherwise, COHERENT.\n\n"
+        "Format your output EXACTLY like this:\n"
+        "ANOMALY: [List the exact suspicious phrase found, or state 'None']\n"
+        "VERDICT: [COHERENT or CONTRADICTORY]\n"
+        "REASON: [Short explanation referencing the anomaly if found]"
     )
     try:
         response = chat_model.generate_content(
-            prompt, 
-            generation_config=genai.types.GenerationConfig(temperature=0.0, max_output_tokens=600), 
+            prompt,
+            generation_config=genai.types.GenerationConfig(temperature=0.0, max_output_tokens=600),
             request_options={"timeout": 15.0}
         )
         res = response.text.strip().upper()
-        verdict = "CONTRADICTORY" if "CONTRADICTORY" in res else "COHERENT"
+        
+        # Parse the forced Chain of Thought output
+        verdict = "CONTRADICTORY" if "VERDICT: CONTRADICTORY" in res else "COHERENT"
         
         reason = "Semantic logic verified."
         for line in response.text.splitlines():
-            if "REASON:" in line.upper():
+            if line.upper().startswith("REASON:"):
                 reason = line.split(":", 1)[-1].strip()
                 break
                 
