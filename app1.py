@@ -238,12 +238,35 @@ def evaluate_phase1_structure(report_text: str):
     return "Missing_Details", valid_conf
 
 def verify_semantic_coherence(bug_report: str):
-    prompt = f"Evaluate software defect report coherence:\n\"\"\"{bug_report}\"\"\"\nCriteria: CONTRADICTORY if non-software logic/spam is found, else COHERENT.\nFormat:\nVERDICT: [COHERENT/CONTRADICTORY]\nREASON: [Short explanation]"
+    prompt = (
+        "You are a strict Software Quality Assurance gatekeeper.\n\n"
+        "Evaluate this defect report for semantic coherence:\n"
+        f"\"\"\"{bug_report}\"\"\"\n\n"
+        "CRITICAL RULES FOR 'CONTRADICTORY':\n"
+        "You MUST output CONTRADICTORY if there is EVEN ONE phrase, sentence, or lyric that is "
+        "non-software related, pop culture, random spam, or a joke, NO MATTER how much valid "
+        "technical code or context surrounds it. Look closely for hidden song lyrics or slang.\n\n"
+        "RULES FOR 'COHERENT':\n"
+        "The entire text is purely software-related (normal greetings/sign-offs are fine).\n\n"
+        "Format exactly as:\n"
+        "VERDICT: [COHERENT/CONTRADICTORY]\n"
+        "REASON: [Short explanation]"
+    )
     try:
-        response = chat_model.generate_content(prompt, generation_config=genai.types.GenerationConfig(temperature=0.0, max_output_tokens=600), request_options={"timeout": 15.0})
+        response = chat_model.generate_content(
+            prompt, 
+            generation_config=genai.types.GenerationConfig(temperature=0.0, max_output_tokens=600), 
+            request_options={"timeout": 15.0}
+        )
         res = response.text.strip().upper()
         verdict = "CONTRADICTORY" if "CONTRADICTORY" in res else "COHERENT"
-        reason = next((line.split(":", 1)[-1].strip() for line in response.text.splitlines() if "REASON:" in line.upper()), "Semantic logic verified.")
+        
+        reason = "Semantic logic verified."
+        for line in response.text.splitlines():
+            if "REASON:" in line.upper():
+                reason = line.split(":", 1)[-1].strip()
+                break
+                
         return verdict, reason
     except Exception as e:
         return "COHERENT", f"[API Fallback] Local check assumed coherent due to network timeout ({type(e).__name__})."
