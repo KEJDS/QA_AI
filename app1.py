@@ -516,6 +516,7 @@ def start_new_chat(preserve_draft=""):
     st.session_state.session_id = str(uuid.uuid4())
     st.session_state.messages = []
     st.session_state.draft_report = preserve_draft
+    st.session_state.prd_text = ""  # <-- Added this line to clear PRD
     for key in ["current_report", "prediction", "confidence", "coherence_status", "coherence_reason", "phase1_ms", "phase2_ms", "duplicates", "coherence_confidence", "coherence_details"]:
         if key in st.session_state: del st.session_state[key]
 
@@ -561,6 +562,28 @@ st.caption("Gemini available" if gemini_available else "Offline-capable mode · 
 tab_workspace, tab_dashboard = st.tabs(["🛠️ Triage Workspace", "📊 QA Manager Dashboard"])
 
 with tab_workspace:
+    # --- NEW: STRICT PRD UPLOAD GATEKEEPER ---
+    st.markdown("### Step 1: Upload Requirements (PRD)")
+    if not st.session_state.get("prd_text"):
+        st.info("⚠️ You must upload a reference document (PRD) before you can analyze a bug report.")
+        uploaded_prd = st.file_uploader("Upload PRD (PDF, Word, TXT)", type=['pdf', 'docx', 'txt'], label_visibility="collapsed")
+        if uploaded_prd:
+            st.session_state.prd_text = extract_text_from_file(uploaded_prd)
+            if st.session_state.prd_text:
+                st.success("✅ Requirements loaded! You can now analyze reports.")
+                st.rerun()
+        st.stop() # Stops the rest of the page from rendering until PRD is uploaded
+    else:
+        col_prd1, col_prd2 = st.columns([3, 1])
+        with col_prd1: st.success("✅ Reference Document is actively loaded.")
+        with col_prd2:
+            if st.button("Clear PRD", use_container_width=True):
+                st.session_state.prd_text = ""
+                st.rerun()
+    st.divider()
+
+    # --- STEP 2: BUG REPORT ANALYSIS (Only runs if PRD is loaded) ---
+    st.markdown("### Step 2: Defect Triage")
     if "current_report" not in st.session_state:
         st.write("Input the defect description below to run Phase 1 structural validation.")
         default_text = st.session_state.get("draft_report", "")
@@ -700,6 +723,7 @@ with tab_workspace:
                             else: st.error(msg)
                 else: st.info("🔒 Sign in to export.")
 
+        # --- AI ASSISTANT CLEANUP ---
         st.markdown("### 🤖 Triage Assistant & PRD Verification")
         col_ai1, col_ai2 = st.columns(2)
         
@@ -727,54 +751,34 @@ with tab_workspace:
 
         with col_ai2:
             st.markdown("#### Requirement Cross-Check")
-            
-            # STRICT BLOCKER: Check if PRD text exists in the session state
-            if not st.session_state.get("prd_text"):
-                st.info("⚠️ You must upload a reference document (PRD) to verify the expected behavior.")
-                # Show the file uploader only if no PRD is loaded
-                uploaded_prd = st.file_uploader("Upload PRD (PDF, Word, TXT)", type=['pdf', 'docx', 'txt'], label_visibility="collapsed")
-                
-                if uploaded_prd:
-                    st.session_state.prd_text = extract_text_from_file(uploaded_prd)
-                    if st.session_state.prd_text:
-                        st.success("✅ Requirements loaded! You can now verify.")
-                        st.rerun() # Refresh to hide the uploader and show the verify button
-            else:
-                # PRD is loaded, show the Verify button
-                st.success("✅ Reference Document is actively loaded.")
-                
-                if gemini_available:
-                    if st.button("Verify against Reference", use_container_width=True, type="primary"):
-                        msg = "Verify this bug report's 'Expected Behavior' against the uploaded Product Requirements Document (PRD)."
-                        st.session_state.messages.append({"role": "user", "content": msg})
-                        
-                        prompt = (
-                            "You are a strict QA Lead. Compare the following Bug Report against the provided Product Requirements Document (PRD).\n\n"
-                            "INSTRUCTIONS:\n"
-                            "1. Verify if the 'Expected Behavior' in the bug report aligns with the PRD.\n"
-                            "2. State whether the bug is valid (a real deviation from requirements) or invalid (works as designed according to the PRD).\n"
-                            "3. Quote the specific section of the PRD that proves your point.\n\n"
-                            f"--- PRD EXTRACT ---\n{st.session_state.prd_text[:12000]}\n\n"
-                            f"--- BUG REPORT ---\n{st.session_state.current_report}"
-                        )
-                        
-                        try:
-                            with st.spinner("Cross-referencing business rules..."):
-                                resp = chat_model.generate_content(prompt)
-                                st.session_state.messages.append({"role": "assistant", "content": resp.text})
-                                save_message(st.session_state.session_id, "assistant", resp.text)
-                        except Exception as e:
-                            # FIX: Properly display Token Exhaustion/API errors in the chat instead of silently failing
-                            fallback_msg = f"⚠️ **PRD Verification Failed (AI Offline)**\n\nUnable to reach Gemini API (Token Exhausted or Network Error). Error details: `{type(e).__name__}`"
-                            st.session_state.messages.append({"role": "assistant", "content": fallback_msg})
-                            save_message(st.session_state.session_id, "assistant", fallback_msg)
-                        
-                        st.rerun()
-                
-                # Allow the user to remove the PRD and upload a new one
-                if st.button("Clear Reference Document", use_container_width=True):
-                    st.session_state.prd_text = ""
+            # Since the PRD upload is enforced at the top, we just need the Verify button here.
+            if gemini_available:
+                if st.button("Verify against Reference", use_container_width=True, type="primary"):
+                    msg = "Verify this bug report's 'Expected Behavior' against the uploaded Product Requirements Document (PRD)."
+                    st.session_state.messages.append({"role": "user", "content": msg})
+                    
+                    prompt = (
+                        "You are a strict QA Lead. Compare the following Bug Report against the provided Product Requirements Document (PRD).\n\n"
+                        "INSTRUCTIONS:\n"
+                        "1. Verify if the 'Expected Behavior' in the bug report aligns with the PRD.\n"
+                        "2. State whether the bug is valid (a real deviation from requirements) or invalid (works as designed according to the PRD).\n"
+                        "3. Quote the specific section of the PRD that proves your point.\n\n"
+                        f"--- PRD EXTRACT ---\n{st.session_state.prd_text[:12000]}\n\n"
+                        f"--- BUG REPORT ---\n{st.session_state.current_report}"
+                    )
+                    
+                    try:
+                        with st.spinner("Cross-referencing business rules..."):
+                            resp = chat_model.generate_content(prompt)
+                            st.session_state.messages.append({"role": "assistant", "content": resp.text})
+                            save_message(st.session_state.session_id, "assistant", resp.text)
+                    except Exception as e:
+                        fallback_msg = f"⚠️ **PRD Verification Failed (AI Offline)**\n\nUnable to reach Gemini API. Error details: `{type(e).__name__}`"
+                        st.session_state.messages.append({"role": "assistant", "content": fallback_msg})
+                        save_message(st.session_state.session_id, "assistant", fallback_msg)
                     st.rerun()
+            else:
+                st.warning("Gemini API is unavailable. Cannot run PRD verification.")
 
         for m in st.session_state.messages:
             with st.chat_message(m["role"]): st.markdown(m["content"])
