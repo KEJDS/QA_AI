@@ -163,7 +163,8 @@ def load_chat_model():
     try:
         available = [m.name for m in genai.list_models()
                      if "generateContent" in m.supported_generation_methods]
-        preferred = ["models/gemini-2.5-flash", "models/gemini-2.0-flash",
+        # ADD YOUR EXACT MODEL NAME TO THE TOP OF THIS LIST:
+        preferred = ["models/gemini-3.8-flash", "models/gemini-2.5-flash", "models/gemini-2.0-flash",
                      "models/gemini-1.5-flash"]
         target = next((m for m in preferred if m in available),
                       available[0] if available else None)
