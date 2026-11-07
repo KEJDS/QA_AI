@@ -15,6 +15,7 @@ import certifi
 from sklearn.metrics.pairwise import cosine_similarity
 from sklearn.feature_extraction.text import TfidfVectorizer
 from authlib.integrations.requests_client import OAuth2Session
+import io
 
 import PyPDF2
 import docx
@@ -60,6 +61,24 @@ st.markdown("""
         }
     </style>
 """, unsafe_allow_html=True)
+
+# ---------------------------------------------------------
+# DOCUMENT PARSER
+# ---------------------------------------------------------
+def extract_text_from_file(uploaded_file):
+    try:
+        if uploaded_file.name.endswith('.pdf'):
+            pdf_reader = PyPDF2.PdfReader(uploaded_file)
+            return "\n".join([page.extract_text() for page in pdf_reader.pages if page.extract_text()])
+        elif uploaded_file.name.endswith('.docx'):
+            doc = docx.Document(uploaded_file)
+            return "\n".join([para.text for para in doc.paragraphs])
+        elif uploaded_file.name.endswith('.txt'):
+            return uploaded_file.getvalue().decode("utf-8")
+        return ""
+    except Exception as e:
+        st.error(f"Error reading file: {e}")
+        return ""
 
 # ---------------------------------------------------------
 # OAUTH 2.0 LOGIN LOGIC (GITHUB ONLY)
@@ -119,6 +138,7 @@ def handle_oauth_login():
             st.session_state.user = None
             st.session_state.session_id = str(uuid.uuid4())
             st.session_state.messages = []
+            st.session_state.prd_text = ""
             
             for key in ["current_report", "prediction", "confidence", "coherence_status", "coherence_reason", "draft_report", "phase1_ms", "phase2_ms", "duplicates", "coherence_confidence", "coherence_details"]:
                 if key in st.session_state:
@@ -364,7 +384,7 @@ def verify_semantic_coherence(bug_report: str, use_gemini=False):
     lower = text.lower()
     words = re.findall(r"\b\w+\b", text)
     
-    # Initialize default metrics and confidence to prevent UnboundLocalError
+    # Initialize scope variables to prevent UnboundLocalError
     confidence = 50.0
     metrics = {
         "relevance": 0.0, "similarity": None,
@@ -381,7 +401,6 @@ def verify_semantic_coherence(bug_report: str, use_gemini=False):
     similarity = calculate_sentence_similarity(text)
     contradictions = detect_contradictions(text)
     
-    # --- UPGRADED LOCAL SURREALISM & ABSURDITY DETECTOR ---
     absurd_patterns = [
         r"\b(?:toaster|bread|pumpernickel|celery|potato|soup|seagulls|purple|caramelize|origami|swan|hieroglyphics)\b",
         r"\b(?:smells like|tastes like|singing|humming|stare intensely|facing north|whisper a polite apology)\b",
@@ -404,13 +423,12 @@ def verify_semantic_coherence(bug_report: str, use_gemini=False):
         confidence = max(confidence, 75)
     confidence = round(min(95, confidence), 1)
 
-    metrics = {
+    metrics.update({
         "relevance": relevance, "similarity": similarity,
         "contradictions": contradictions, "matched_terms": matched,
-        "word_count": len(words), "has_steps": has_steps,
-        "has_expected": has_expected, "has_actual": has_actual,
-        "absurd_hits": len(absurd_hits)
-    }
+        "has_steps": has_steps, "has_expected": has_expected, 
+        "has_actual": has_actual, "absurd_hits": len(absurd_hits)
+    })
 
     if use_gemini and chat_model is not None:
         prompt = (
@@ -444,7 +462,6 @@ def verify_semantic_coherence(bug_report: str, use_gemini=False):
         except Exception as exc:
             metrics["gemini_error"] = type(exc).__name__
 
-    # --- ENFORCED LOCAL CHECK FOR ABSURDITY ---
     if absurd_hits:
         return "CONTRADICTORY", "Local anomaly rule: Detected surreal, satirical, or physically impossible claims (e.g., sentient hardware or absurd environmental steps).", confidence, metrics
 
@@ -508,6 +525,7 @@ def start_new_chat(preserve_draft=""):
 
 if "session_id" not in st.session_state: st.session_state.session_id = str(uuid.uuid4())
 if "messages" not in st.session_state: st.session_state.messages = []
+if "prd_text" not in st.session_state: st.session_state.prd_text = ""
 
 with st.sidebar:
     if st.button("New Chat", use_container_width=True, type="primary"):
@@ -582,7 +600,6 @@ with tab_workspace:
             if st.session_state.prediction == "Valid": st.success(f"Valid Structure ({st.session_state.confidence}%)")
             else: st.error(f"Missing Details ({st.session_state.confidence}%)")
             
-            # --- RETRY PHASE 1 BUTTON ---
             if st.button("🔄 Re-run Phase 1", use_container_width=True):
                 with st.spinner("Re-evaluating structural integrity..."):
                     t0 = time.time()
@@ -683,26 +700,71 @@ with tab_workspace:
                             else: st.error(msg)
                 else: st.info("🔒 Sign in to export.")
 
-        st.markdown("### Triage Assistant")
-        if st.button("Standardize & Route via AI"):
-            msg = "Standardize this bug report. Identify Severity, Component Routing, and Root Cause."
-            st.session_state.messages.append({"role": "user", "content": msg})
-            save_message(st.session_state.session_id, "user", msg)
+        st.markdown("### 🤖 Triage Assistant & PRD Verification")
+        col_ai1, col_ai2 = st.columns(2)
+        
+        with col_ai1:
+            st.markdown("#### Standard Route")
+            if st.button("Standardize & Route via AI", use_container_width=True):
+                msg = "Standardize this bug report. Identify Severity, Component Routing, and Root Cause."
+                st.session_state.messages.append({"role": "user", "content": msg})
+                save_message(st.session_state.session_id, "user", msg)
+                
+                resp = generate_ai_response(msg, st.session_state.current_report, st.session_state.prediction, stream=True)
+                if isinstance(resp, str): 
+                    st.session_state.messages.append({"role": "assistant", "content": resp})
+                else:
+                    def stream_gen():
+                        full = ""
+                        for chunk in resp:
+                            if chunk.text:
+                                full += chunk.text
+                                yield chunk.text
+                        save_message(st.session_state.session_id, "assistant", full)
+                        st.session_state.messages.append({"role": "assistant", "content": full})
+                    st.write_stream(stream_gen)
+                st.rerun()
+
+        with col_ai2:
+            st.markdown("#### Requirement Cross-Check")
             
-            resp = generate_ai_response(msg, st.session_state.current_report, st.session_state.prediction, stream=True)
-            if isinstance(resp, str): 
-                st.session_state.messages.append({"role": "assistant", "content": resp})
+            if not st.session_state.get("prd_text"):
+                st.info("⚠️ You must upload a reference document (PRD) to verify the expected behavior.")
+                uploaded_prd = st.file_uploader("Upload PRD (PDF, Word, TXT)", type=['pdf', 'docx', 'txt'], label_visibility="collapsed")
+                if uploaded_prd:
+                    st.session_state.prd_text = extract_text_from_file(uploaded_prd)
+                    if st.session_state.prd_text:
+                        st.success("✅ Requirements loaded! You can now verify.")
+                        st.rerun()
             else:
-                def stream_gen():
-                    full = ""
-                    for chunk in resp:
-                        if chunk.text:
-                            full += chunk.text
-                            yield chunk.text
-                    save_message(st.session_state.session_id, "assistant", full)
-                    st.session_state.messages.append({"role": "assistant", "content": full})
-                st.write_stream(stream_gen)
-            st.rerun()
+                st.success("✅ Reference Document is actively loaded.")
+                if gemini_available:
+                    if st.button("Verify against Reference", use_container_width=True, type="primary"):
+                        msg = "Verify this bug report's 'Expected Behavior' against the uploaded Product Requirements Document (PRD)."
+                        st.session_state.messages.append({"role": "user", "content": msg})
+                        
+                        prompt = (
+                            "You are a strict QA Lead. Compare the following Bug Report against the provided Product Requirements Document (PRD).\n\n"
+                            "INSTRUCTIONS:\n"
+                            "1. Verify if the 'Expected Behavior' in the bug report aligns with the PRD.\n"
+                            "2. State whether the bug is valid (a real deviation from requirements) or invalid (works as designed according to the PRD).\n"
+                            "3. Quote the specific section of the PRD that proves your point.\n\n"
+                            f"--- PRD EXTRACT ---\n{st.session_state.prd_text[:12000]}\n\n"
+                            f"--- BUG REPORT ---\n{st.session_state.current_report}"
+                        )
+                        
+                        try:
+                            with st.spinner("Cross-referencing business rules..."):
+                                resp = chat_model.generate_content(prompt)
+                                st.session_state.messages.append({"role": "assistant", "content": resp.text})
+                                save_message(st.session_state.session_id, "assistant", resp.text)
+                        except Exception as e:
+                            st.error(f"Error checking requirements: {e}")
+                        st.rerun()
+                
+                if st.button("Clear Reference Document", use_container_width=True):
+                    st.session_state.prd_text = ""
+                    st.rerun()
 
         for m in st.session_state.messages:
             with st.chat_message(m["role"]): st.markdown(m["content"])
