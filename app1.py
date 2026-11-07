@@ -728,16 +728,21 @@ with tab_workspace:
         with col_ai2:
             st.markdown("#### Requirement Cross-Check")
             
+            # STRICT BLOCKER: Check if PRD text exists in the session state
             if not st.session_state.get("prd_text"):
                 st.info("⚠️ You must upload a reference document (PRD) to verify the expected behavior.")
+                # Show the file uploader only if no PRD is loaded
                 uploaded_prd = st.file_uploader("Upload PRD (PDF, Word, TXT)", type=['pdf', 'docx', 'txt'], label_visibility="collapsed")
+                
                 if uploaded_prd:
                     st.session_state.prd_text = extract_text_from_file(uploaded_prd)
                     if st.session_state.prd_text:
                         st.success("✅ Requirements loaded! You can now verify.")
-                        st.rerun()
+                        st.rerun() # Refresh to hide the uploader and show the verify button
             else:
+                # PRD is loaded, show the Verify button
                 st.success("✅ Reference Document is actively loaded.")
+                
                 if gemini_available:
                     if st.button("Verify against Reference", use_container_width=True, type="primary"):
                         msg = "Verify this bug report's 'Expected Behavior' against the uploaded Product Requirements Document (PRD)."
@@ -759,9 +764,14 @@ with tab_workspace:
                                 st.session_state.messages.append({"role": "assistant", "content": resp.text})
                                 save_message(st.session_state.session_id, "assistant", resp.text)
                         except Exception as e:
-                            st.error(f"Error checking requirements: {e}")
+                            # FIX: Properly display Token Exhaustion/API errors in the chat instead of silently failing
+                            fallback_msg = f"⚠️ **PRD Verification Failed (AI Offline)**\n\nUnable to reach Gemini API (Token Exhausted or Network Error). Error details: `{type(e).__name__}`"
+                            st.session_state.messages.append({"role": "assistant", "content": fallback_msg})
+                            save_message(st.session_state.session_id, "assistant", fallback_msg)
+                        
                         st.rerun()
                 
+                # Allow the user to remove the PRD and upload a new one
                 if st.button("Clear Reference Document", use_container_width=True):
                     st.session_state.prd_text = ""
                     st.rerun()
