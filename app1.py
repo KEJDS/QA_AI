@@ -35,9 +35,7 @@ SAMPLE_CSV_PATH = find_project_file("spark_sample_30.csv")
 
 st.set_page_config(page_title="BugTriage-NLP", layout="wide", initial_sidebar_state="expanded")
 
-# ---------------------------------------------------------
-# CUSTOM CSS
-# ---------------------------------------------------------
+
 st.markdown("""
     <style>
         #MainMenu {visibility: hidden;}
@@ -62,9 +60,7 @@ st.markdown("""
     </style>
 """, unsafe_allow_html=True)
 
-# ---------------------------------------------------------
-# DOCUMENT PARSER
-# ---------------------------------------------------------
+
 def extract_text_from_file(uploaded_file):
     try:
         if uploaded_file.name.endswith('.pdf'):
@@ -80,9 +76,9 @@ def extract_text_from_file(uploaded_file):
         st.error(f"Error reading file: {e}")
         return ""
 
-# ---------------------------------------------------------
+
 # OAUTH 2.0 LOGIN LOGIC (GITHUB ONLY)
-# ---------------------------------------------------------
+
 if "user" not in st.session_state:
     st.session_state.user = None
 
@@ -149,9 +145,9 @@ def handle_oauth_login():
 
 handle_oauth_login()
 
-# ---------------------------------------------------------
+
 # CORE SYSTEM INIT
-# ---------------------------------------------------------
+
 GEMINI_API_KEY = st.secrets.get("GOOGLE_API_KEY", os.getenv("GOOGLE_API_KEY", ""))
 if GEMINI_API_KEY:
     genai.configure(api_key=GEMINI_API_KEY)
@@ -275,9 +271,9 @@ def evaluate_phase1_structure(report_text: str):
         return "Valid", valid_conf
     return "Missing_Details", valid_conf
 
-# ---------------------------------------------------------
+
 # PHASE 2: LOCAL COHERENCE CHECKER + OPTIONAL GEMINI
-# ---------------------------------------------------------
+
 SOFTWARE_TERMS = {
     "software", "system", "application", "app", "website", "webpage",
     "browser", "database", "sql", "mongo", "api", "endpoint", "server",
@@ -521,9 +517,9 @@ def start_new_chat(preserve_draft=""):
     for key in ["current_report", "prediction", "confidence", "coherence_status", "coherence_reason", "phase1_ms", "phase2_ms", "duplicates", "coherence_confidence", "coherence_details"]:
         if key in st.session_state: del st.session_state[key]
 
-# ---------------------------------------------------------
+
 # UI RENDERING
-# ---------------------------------------------------------
+
 
 if "session_id" not in st.session_state: st.session_state.session_id = str(uuid.uuid4())
 if "messages" not in st.session_state: st.session_state.messages = []
