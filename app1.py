@@ -1,816 +1,801 @@
+import io
+import json
 import os
-import glob
-import uuid
-import time
 import re
-import urllib.parse
+import time
 from datetime import datetime, timezone
-import requests
-import joblib
+from typing import Any, Dict, List, Optional, Tuple
+
+import numpy as np
 import pandas as pd
 import streamlit as st
-import google.generativeai as genai
-from pymongo import MongoClient
-import certifi
-from sklearn.metrics.pairwise import cosine_similarity
 from sklearn.feature_extraction.text import TfidfVectorizer
-from authlib.integrations.requests_client import OAuth2Session
-import io
+from sklearn.linear_model import LogisticRegression
+from sklearn.metrics.pairwise import cosine_similarity
 
-import PyPDF2
-import docx
-
-BASE_DIR = os.path.dirname(os.path.abspath(__file__))
-
-def find_project_file(filename):
-    direct_path = os.path.join(BASE_DIR, filename)
-    if os.path.exists(direct_path):
-        return direct_path
-    matches = glob.glob(os.path.join(BASE_DIR, "**", filename), recursive=True)
-    return matches[0] if matches else direct_path
-
-VEC_PATH = find_project_file("tfidf_vectorizer.pkl")
-CLF_PATH = find_project_file("logistic_regression_validator.pkl")
-SAMPLE_CSV_PATH = find_project_file("spark_sample_30.csv")
-
-st.set_page_config(page_title="BugTriage-NLP", layout="wide", initial_sidebar_state="expanded")
-
-
-st.markdown("""
-    <style>
-        #MainMenu {visibility: hidden;}
-        footer {visibility: hidden;}
-        div.stButton > button[kind="primary"] {
-            background-color: #198754 !important;
-            color: white !important;
-            border-color: #198754 !important;
-            border-radius: 6px;
-            font-weight: 500;
-            transition: all 0.2s ease;
-        }
-        div.stButton > button[kind="primary"]:hover {
-            background-color: #157347 !important;
-            border-color: #157347 !important;
-            box-shadow: 0 4px 6px rgba(0,0,0,0.1);
-        }
-        div.stButton > button[kind="secondary"] {
-            border-radius: 6px;
-            font-weight: 500;
-        }
-    </style>
-""", unsafe_allow_html=True)
-
-
-def extract_text_from_file(uploaded_file):
+# Optional dependencies for file parsing, Gemini SDK, and MongoDB
+try:
+    from pypdf import PdfReader
+except ImportError:
     try:
-        if uploaded_file.name.endswith('.pdf'):
-            pdf_reader = PyPDF2.PdfReader(uploaded_file)
-            return "\n".join([page.extract_text() for page in pdf_reader.pages if page.extract_text()])
-        elif uploaded_file.name.endswith('.docx'):
-            doc = docx.Document(uploaded_file)
-            return "\n".join([para.text for para in doc.paragraphs])
-        elif uploaded_file.name.endswith('.txt'):
-            return uploaded_file.getvalue().decode("utf-8")
-        return ""
-    except Exception as e:
-        st.error(f"Error reading file: {e}")
-        return ""
+        from PyPDF2 import PdfReader  # type: ignore
+    except ImportError:
+        PdfReader = None
+
+try:
+    import docx  # python-docx
+except ImportError:
+    docx = None
+
+try:
+    from google import genai
+except ImportError:
+    genai = None
+
+try:
+    from pymongo import MongoClient
+except ImportError:
+    MongoClient = None
 
 
-# OAUTH 2.0 LOGIN LOGIC (GITHUB ONLY)
+# ==============================================================================
+# 1. PAGE CONFIGURATION & THEME
+# ==============================================================================
+st.set_page_config(
+    page_title="BugTriage-NLP | Hybrid Defect Validation & Triage",
+    page_icon="🐞",
+    layout="wide",
+)
 
-if "user" not in st.session_state:
-    st.session_state.user = None
-
-def handle_oauth_login():
-    st.sidebar.markdown("### Authentication")
-    
-    if "github" not in st.secrets:
-        st.sidebar.warning("GitHub OAuth secrets missing. Exporting disabled.")
-        return
-
-    if st.session_state.user is None:
-        st.sidebar.info("Sign in to save history and export tickets.")
-        query_params = st.query_params
-        
-        if "code" in query_params:
-            code = query_params["code"]
-            provider = query_params.get("state") 
-            
-            if provider == "github":
-                try:
-                    gh_cfg = st.secrets["github"]
-                    client = OAuth2Session(
-                        gh_cfg["client_id"], 
-                        gh_cfg["client_secret"],
-                        redirect_uri=gh_cfg["redirect_uri"]
-                    )
-                    token = client.fetch_token("https://github.com/login/oauth/access_token", code=code)
-                    resp = client.get("https://api.github.com/user")
-                    user_info = resp.json()
-                    st.session_state.user = {
-                        "name": user_info.get("name") or user_info.get("login"),
-                        "email": user_info.get("email") or f"{user_info.get('login')}@github.user",
-                        "provider": "GitHub",
-                        "access_token": token.get("access_token")
-                    }
-                    st.query_params.clear()
-                    st.rerun()
-                except Exception as e:
-                    st.sidebar.error(f"GitHub Login Failed: {e}")
-
-        gh_cfg = st.secrets["github"]
-        gh_auth_url = (
-            f"https://github.com/login/oauth/authorize?"
-            f"client_id={gh_cfg['client_id']}&"
-            f"redirect_uri={urllib.parse.quote(gh_cfg['redirect_uri'])}&"
-            f"scope=repo%20user:email&state=github"
-        )
-        st.sidebar.link_button("Login with GitHub", gh_auth_url, use_container_width=True)
-
-    else:
-        st.sidebar.success(f"Logged in as: **{st.session_state.user['name']}**")
-        if st.sidebar.button("Log out", use_container_width=True):
-            st.session_state.user = None
-            st.session_state.session_id = str(uuid.uuid4())
-            st.session_state.messages = []
-            st.session_state.prd_text = ""
-            
-            for key in ["current_report", "prediction", "confidence", "coherence_status", "coherence_reason", "draft_report", "phase1_ms", "phase2_ms", "duplicates", "coherence_confidence", "coherence_details"]:
-                if key in st.session_state:
-                    del st.session_state[key]
-                    
-            st.query_params.clear()
-            st.rerun()
-
-handle_oauth_login()
+GEMINI_MODEL_NAME = "gemini-3.8-flash"
+DUPLICATE_THRESHOLD = 0.85
 
 
-# CORE SYSTEM INIT
+# ==============================================================================
+# 2. LOCAL PHASE 1 CLASSIFIER, ABSURDITY FILTER & DUPLICATE DETECTOR
+# ==============================================================================
+ABSURDITY_PATTERNS = [
+    r"\b(flat earth|aliens?|time travel|teleport|unicorn|dragon|magic spell|zombie)\b",
+    r"\b(gravity reversed|physics broke|universe exploded|my coffee brewed itself)\b",
+    r"\b(lol+ right now|just kidding|jk+|meme bug|april fools)\b",
+    r"\b(1000000% cpu|9999999 gb ram|infinite loop that froze time)\b",
+]
 
-GEMINI_API_KEY = st.secrets.get("GOOGLE_API_KEY", os.getenv("GOOGLE_API_KEY", ""))
-if GEMINI_API_KEY:
-    genai.configure(api_key=GEMINI_API_KEY)
+
+def is_absurd_report(text: str) -> Tuple[bool, str]:
+    """Local regex-based absurdity/nonsense filter before spending API tokens."""
+    cleaned = (text or "").strip().lower()
+    if not cleaned:
+        return False, ""
+    for pat in ABSURDITY_PATTERNS:
+        if re.search(pat, cleaned, flags=re.IGNORECASE):
+            return True, f"Matched non-technical / absurd pattern: `{pat}`"
+    return False, ""
+
 
 @st.cache_resource
-def load_chat_model():
-    if not GEMINI_API_KEY:
+def build_local_classifier() -> Tuple[TfidfVectorizer, LogisticRegression]:
+    """
+    Builds TF-IDF (unigram + bigram) + Logistic Regression model for Phase 1
+    structural completeness classification ("Valid" vs "Missing_Details").
+    """
+    training_samples: List[Tuple[str, str]] = [
+        # Structurally complete / valid defect reports
+        (
+            "Steps to reproduce: 1. Navigate to /login. 2. Enter valid email and wrong password. "
+            "3. Click Sign In. Expected result: Error message 'Invalid credentials' appears. "
+            "Actual result: App returns HTTP 500 Internal Server Error on API /auth/login.",
+            "Valid",
+        ),
+        (
+            "On checkout page, selecting express shipping and applying promo code SAVE10 fails "
+            "to recalculate total. Expected: Discount subtracts 10% from subtotal. "
+            "Actual: Total stays unchanged and console logs TypeError in cart.js line 84.",
+            "Valid",
+        ),
+        (
+            "When exporting a CSV report with >5000 rows from the Analytics dashboard, "
+            "the request times out after 30 seconds. Expected: File downloads within 5 seconds. "
+            "Actual: Gateway timeout 504 occurs in backend export endpoint.",
+            "Valid",
+        ),
+        (
+            "Repro steps: Open user profile settings, upload a 2MB PNG avatar, click Save. "
+            "Expected: Avatar updates and persists on reload. Actual: Profile image reverts "
+            "to default placeholder and MongoDB profile document is not updated.",
+            "Valid",
+        ),
+        (
+            "Filter by date range on Invoices table throws SQL syntax error when end date is empty. "
+            "Expected: Return all invoices from start date onward. Actual: 400 Bad Request "
+            "with malformed query parameter error.",
+            "Valid",
+        ),
+        (
+            "Mobile view (375px width) overlaps the submit button over the terms checkbox on "
+            "registration form. Expected: Checkbox and button stack cleanly without overlap. "
+            "Actual: Button blocks tapping the checkbox in Chrome Android.",
+            "Valid",
+        ),
+        # Structurally incomplete / missing details
+        (
+            "Login broken",
+            "Missing_Details",
+        ),
+        (
+            "Bug on dashboard please fix",
+            "Missing_Details",
+        ),
+        (
+            "It does not work when I click it",
+            "Missing_Details",
+        ),
+        (
+            "Page crashing sometimes",
+            "Missing_Details",
+        ),
+        (
+            "Wrong value shown",
+            "Missing_Details",
+        ),
+        (
+            "API issue",
+            "Missing_Details",
+        ),
+    ]
+
+    texts = [t for t, _ in training_samples]
+    labels = [lbl for _, lbl in training_samples]
+
+    vectorizer = TfidfVectorizer(ngram_range=(1, 2), lowercase=True, stop_words="english")
+    x_vec = vectorizer.fit_transform(texts)
+
+    clf = LogisticRegression(max_iter=1000, random_state=42)
+    clf.fit(x_vec, labels)
+    return vectorizer, clf
+
+
+def run_phase1_validation(
+    bug_text: str,
+    vectorizer: TfidfVectorizer,
+    clf: LogisticRegression,
+    historical_reports: List[Dict[str, Any]],
+) -> Dict[str, Any]:
+    """
+    Executes Phase 1:
+    1. Absurdity check
+    2. Structural completeness check (TF-IDF + Logistic Regression + basic heuristics)
+    3. Historical duplicate detection via TF-IDF cosine similarity (>= 0.85)
+    """
+    start_ms = time.perf_counter()
+    clean_text = (bug_text or "").strip()
+
+    absurd_flag, absurd_reason = is_absurd_report(clean_text)
+
+    if not clean_text:
+        return {
+            "status": "Missing_Details",
+            "is_valid_structure": False,
+            "confidence": 0.0,
+            "is_absurd": False,
+            "absurd_reason": "",
+            "missing_hints": ["Defect description is empty."],
+            "duplicate_match": None,
+            "elapsed_ms": round((time.perf_counter() - start_ms) * 1000, 2),
+        }
+
+    x_input = vectorizer.transform([clean_text])
+    probs = clf.predict_proba(x_input)[0]
+    classes = list(clf.classes_)
+    valid_idx = classes.index("Valid") if "Valid" in classes else 1
+    valid_prob = float(probs[valid_idx])
+
+    # Structural heuristics to reinforce short/vague entries
+    word_count = len(clean_text.split())
+    lower_t = clean_text.lower()
+    has_expected_or_actual = any(
+        k in lower_t for k in ["expected", "actual", "step", "repro", "error", "fails", "timeout"]
+    )
+
+    missing_hints: List[str] = []
+    if word_count < 12:
+        missing_hints.append("Description is very brief (fewer than 12 words).")
+    if not has_expected_or_actual:
+        missing_hints.append(
+            "Include reproduction steps, expected behavior, and actual behavior/error details."
+        )
+
+    is_structurally_valid = (valid_prob >= 0.55) and (word_count >= 10) and (not absurd_flag)
+    status_label = "Valid" if is_structurally_valid else "Missing_Details"
+
+    # Historical duplicate check using cosine similarity
+    duplicate_match: Optional[Dict[str, Any]] = None
+    corpus = [r.get("raw_report", "") for r in historical_reports if r.get("raw_report")]
+    if corpus:
+        all_docs = corpus + [clean_text]
+        dup_vec = TfidfVectorizer(ngram_range=(1, 2), stop_words="english").fit_transform(all_docs)
+        sim_scores = cosine_similarity(dup_vec[-1], dup_vec[:-1])[0]
+        best_idx = int(np.argmax(sim_scores))
+        best_score = float(sim_scores[best_idx])
+        if best_score >= DUPLICATE_THRESHOLD:
+            matched_doc = historical_reports[best_idx]
+            duplicate_match = {
+                "similarity": round(best_score * 100, 1),
+                "matched_title": matched_doc.get("ticket_title", "Historical Defect"),
+                "matched_component": matched_doc.get("component", "Unassigned"),
+            }
+
+    return {
+        "status": status_label,
+        "is_valid_structure": is_structurally_valid,
+        "confidence": round(valid_prob * 100, 2),
+        "is_absurd": absurd_flag,
+        "absurd_reason": absurd_reason,
+        "missing_hints": missing_hints,
+        "duplicate_match": duplicate_match,
+        "elapsed_ms": round((time.perf_counter() - start_ms) * 1000, 2),
+    }
+
+
+# ==============================================================================
+# 3. DOCUMENT PARSER (.TXT, .PDF, .DOCX) & GEMINI CLIENT
+# ==============================================================================
+def extract_uploaded_text(uploaded_file) -> Tuple[str, Optional[str]]:
+    """Extracts text from .txt, .pdf, or .docx files."""
+    if uploaded_file is None:
+        return "", "No file provided."
+
+    file_name = (uploaded_file.name or "").lower()
+    raw_bytes = uploaded_file.getvalue()
+
+    try:
+        if file_name.endswith(".txt"):
+            return raw_bytes.decode("utf-8", errors="replace"), None
+
+        if file_name.endswith(".pdf"):
+            if PdfReader is None:
+                return "", "Install `pypdf` or `PyPDF2` to parse PDF documents."
+            reader = PdfReader(io.BytesIO(raw_bytes))
+            pages_text = [(page.extract_text() or "") for page in reader.pages]
+            return "\n".join(pages_text).strip(), None
+
+        if file_name.endswith(".docx"):
+            if docx is None:
+                return "", "Install `python-docx` to parse DOCX documents."
+            document = docx.Document(io.BytesIO(raw_bytes))
+            paragraphs = [p.text for p in document.paragraphs if p.text.strip()]
+            return "\n".join(paragraphs).strip(), None
+
+        return "", "Unsupported file type. Please upload a .txt, .pdf, or .docx file."
+    except Exception as exc:
+        return "", f"Failed to parse uploaded file: {exc}"
+
+
+def get_gemini_client() -> Tuple[Optional[Any], Optional[str]]:
+    """Initializes Google GenAI client if SDK and API key are available."""
+    api_key = os.getenv("GEMINI_API_KEY") or st.secrets.get("GEMINI_API_KEY", "")  # type: ignore
+    if not api_key:
+        return None, "GEMINI_API_KEY is not set."
+    if genai is None:
+        return None, "`google-genai` package is not installed."
+    try:
+        client = genai.Client(api_key=api_key)
+        return client, None
+    except Exception as exc:
+        return None, f"Could not initialize Gemini client: {exc}"
+
+
+def call_gemini_with_fallback(
+    client: Any,
+    prompt: str,
+    model_name: str = GEMINI_MODEL_NAME,
+) -> Tuple[Optional[str], Optional[str]]:
+    """
+    Calls Gemini model and returns (response_text, error_message).
+    Catches quota/token exhaustion, timeouts, or model errors gracefully.
+    """
+    if client is None:
+        return None, "Gemini client unavailable."
+    try:
+        resp = client.models.generate_content(
+            model=model_name,
+            contents=prompt,
+        )
+        text = (getattr(resp, "text", "") or "").strip()
+        if not text:
+            return None, "Empty response returned by Gemini."
+        return text, None
+    except Exception as exc:
+        return None, f"Gemini fallback triggered ({type(exc).__name__}): {exc}"
+
+
+# ==============================================================================
+# 4. COMBINED COHERENCY + REQUIREMENTS CHECK & TICKET RESTRUCTURING
+# ==============================================================================
+def evaluate_coherency_and_requirements(
+    client: Any,
+    bug_report_text: str,
+    prd_text: str,
+    guidelines_text: str = "",
+) -> Dict[str, Any]:
+    """
+    Evaluates BOTH:
+      1. Internal logical coherency ("coherent")
+      2. Alignment with uploaded PRD / instructions ("follows_requirements")
+    Returns exact status labels:
+      - "Passed Both"
+      - "Not Coherent"
+      - "Not Accurate to the Instructions"
+      - "Not Coherent & Not Accurate to the Instructions"
+    With local heuristic fallback if Gemini is unavailable or hits token limits.
+    """
+    start_ms = time.perf_counter()
+    prd_clean = (prd_text or "").strip()
+    bug_clean = (bug_report_text or "").strip()
+    guide_clean = (guidelines_text or "").strip()
+
+    if not prd_clean:
+        return {
+            "coherent": None,
+            "follows_requirements": False,
+            "status_label": "Missing PRD / Requirements Document",
+            "coherency_reason": "Cannot verify requirements compliance without an uploaded PRD.",
+            "requirements_reason": "Please upload a PRD file (.txt, .pdf, .docx) first.",
+            "fallback_used": False,
+            "elapsed_ms": round((time.perf_counter() - start_ms) * 1000, 2),
+        }
+
+    requirements_context = prd_clean[:10000]
+    if guide_clean:
+        requirements_context += f"\n\nADDITIONAL QA GUIDELINES:\n{guide_clean[:4000]}"
+
+    prompt = f"""
+You are a strict QA & Requirements Verification engine.
+Analyze the BUG REPORT against TWO independent checks:
+
+1. COHERENCY ("coherent"):
+   - Are the steps, actual behavior, and expected behavior logically consistent?
+   - Does it avoid self-contradictions or impossible/nonsensical claims?
+
+2. REQUIREMENTS / INSTRUCTIONS ACCURACY ("follows_requirements"):
+   - Does the bug report align with the business rules, expected behaviors, and scope in the UPLOADED PRD / QA INSTRUCTIONS?
+   - Mark "follows_requirements": false if the report claims something contradicts the PRD or violates stated instructions/rules.
+
+Respond ONLY with raw JSON (no markdown fences) matching this exact schema:
+{{
+  "coherent": true or false,
+  "follows_requirements": true or false,
+  "coherency_reason": "brief explanation",
+  "requirements_reason": "brief explanation"
+}}
+
+UPLOADED PRD & INSTRUCTIONS:
+\"\"\"{requirements_context}\"\"\"
+
+BUG REPORT:
+\"\"\"{bug_clean}\"\"\"
+"""
+
+    raw_text, err = call_gemini_with_fallback(client, prompt, GEMINI_MODEL_NAME)
+
+    if raw_text and not err:
+        try:
+            cleaned_json = re.sub(r"^```(?:json)?\s*|\s*```$", "", raw_text, flags=re.DOTALL).strip()
+            parsed = json.loads(cleaned_json)
+            coherent = bool(parsed.get("coherent", False))
+            follows_req = bool(parsed.get("follows_requirements", False))
+            coh_reason = str(parsed.get("coherency_reason", "")).strip()
+            req_reason = str(parsed.get("requirements_reason", "")).strip()
+
+            if coherent and follows_req:
+                status_label = "Passed Both"
+            elif (not coherent) and follows_req:
+                status_label = "Not Coherent"
+            elif coherent and (not follows_req):
+                status_label = "Not Accurate to the Instructions"
+            else:
+                status_label = "Not Coherent & Not Accurate to the Instructions"
+
+            return {
+                "coherent": coherent,
+                "follows_requirements": follows_req,
+                "status_label": status_label,
+                "coherency_reason": coh_reason or "Evaluated by Gemini.",
+                "requirements_reason": req_reason or "Evaluated against uploaded PRD.",
+                "fallback_used": False,
+                "elapsed_ms": round((time.perf_counter() - start_ms) * 1000, 2),
+            }
+        except Exception:
+            err = "Malformed JSON returned by model; fell back to local rule check."
+
+    # Graceful local fallback when API is unavailable or token-exhausted
+    absurd_flag, absurd_reason = is_absurd_report(bug_clean)
+    coherent_local = not absurd_flag
+
+    # Basic keyword overlap check against PRD terms as deterministic fallback
+    prd_tokens = {w for w in re.findall(r"[a-z]{4,}", prd_clean.lower())}
+    bug_tokens = {w for w in re.findall(r"[a-z]{4,}", bug_clean.lower())}
+    overlap_ratio = (len(prd_tokens & bug_tokens) / max(1, len(bug_tokens))) if bug_tokens else 0.0
+    follows_req_local = overlap_ratio >= 0.12
+
+    if coherent_local and follows_req_local:
+        status_label = "Passed Both"
+    elif (not coherent_local) and follows_req_local:
+        status_label = "Not Coherent"
+    elif coherent_local and (not follows_req_local):
+        status_label = "Not Accurate to the Instructions"
+    else:
+        status_label = "Not Coherent & Not Accurate to the Instructions"
+
+    return {
+        "coherent": coherent_local,
+        "follows_requirements": follows_req_local,
+        "status_label": status_label,
+        "coherency_reason": (
+            absurd_reason if absurd_flag else "Local fallback: no internal contradiction detected."
+        ),
+        "requirements_reason": (
+            f"Local fallback ({err}): token alignment ratio = {overlap_ratio:.0%} against PRD."
+        ),
+        "fallback_used": True,
+        "elapsed_ms": round((time.perf_counter() - start_ms) * 1000, 2),
+    }
+
+
+def generate_structured_ticket(
+    client: Any,
+    bug_report_text: str,
+    prd_text: str,
+    guidelines_text: str,
+    check_result: Dict[str, Any],
+) -> Tuple[Dict[str, Any], float, bool]:
+    """Produces a standardized developer ticket with graceful local fallback."""
+    start_ms = time.perf_counter()
+
+    prompt = f"""
+Convert the raw bug report into a structured Agile developer ticket using the PRD and QA guidelines.
+Return ONLY valid JSON with keys:
+- "ticket_title": string
+- "severity": one of ["Critical", "High", "Medium", "Low"]
+- "component": string (e.g., "Authentication", "Checkout / Billing", "UI / Frontend", "API / Backend", "Reporting")
+- "probable_root_cause": string
+- "prd_alignment_notes": string
+- "formatted_markdown": markdown string with Summary, Steps to Reproduce, Expected vs Actual Behavior, and PRD Notes
+
+PRD:
+\"\"\"{prd_text[:8000]}\"\"\"
+
+QA GUIDELINES:
+\"\"\"{guidelines_text[:3000]}\"\"\"
+
+COMBINED CHECK STATUS:
+{check_result.get("status_label", "Unchecked")} | {check_result.get("coherency_reason", "")} | {check_result.get("requirements_reason", "")}
+
+RAW BUG REPORT:
+\"\"\"{bug_report_text}\"\"\"
+"""
+
+    raw_text, err = call_gemini_with_fallback(client, prompt, GEMINI_MODEL_NAME)
+    elapsed_ms = round((time.perf_counter() - start_ms) * 1000, 2)
+
+    if raw_text and not err:
+        try:
+            cleaned = re.sub(r"^```(?:json)?\s*|\s*```$", "", raw_text, flags=re.DOTALL).strip()
+            data = json.loads(cleaned)
+            return data, elapsed_ms, False
+        except Exception:
+            pass
+
+    # Fallback ticket structure
+    first_line = (bug_report_text or "Defect Report").strip().splitlines()[0][:80]
+    fallback_ticket = {
+        "ticket_title": f"[Triage] {first_line}",
+        "severity": "Medium",
+        "component": "General / Unassigned",
+        "probable_root_cause": "Generated via local fallback; manual root-cause verification recommended.",
+        "prd_alignment_notes": check_result.get("requirements_reason", "Pending PRD review."),
+        "formatted_markdown": (
+            f"### {first_line}\n"
+            f"- **Severity:** Medium\n"
+            f"- **Component:** General / Unassigned\n"
+            f"- **Verification Status:** {check_result.get('status_label', 'N/A')}\n"
+            f"- **Raw Report:** {bug_report_text}\n"
+        ),
+    }
+    return fallback_ticket, elapsed_ms, True
+
+
+# ==============================================================================
+# 5. MONGODB PERSISTENCE & ANALYTICS HELPERS
+# ==============================================================================
+@st.cache_resource
+def get_mongo_collection():
+    """Connects to MongoDB collection if MONGO_URI is configured."""
+    mongo_uri = os.getenv("MONGO_URI") or st.secrets.get("MONGO_URI", "")  # type: ignore
+    db_name = os.getenv("MONGO_DB", "bugtriage_nlp")
+    col_name = os.getenv("MONGO_COLLECTION", "triage_logs")
+    if not mongo_uri or MongoClient is None:
         return None
     try:
-        available = [m.name for m in genai.list_models()
-                     if "generateContent" in m.supported_generation_methods]
-        # ADD YOUR EXACT MODEL NAME TO THE TOP OF THIS LIST:
-        preferred = ["models/gemini-3.8-flash", "models/gemini-2.5-flash", "models/gemini-2.0-flash",
-                     "models/gemini-1.5-flash"]
-        target = next((m for m in preferred if m in available),
-                      available[0] if available else None)
-        if not target:
-            return None
-        return genai.GenerativeModel(
-            model_name=target,
-            system_instruction="You are an expert Software QA triage specialist. Be concise."
-        )
+        client = MongoClient(mongo_uri, serverSelectionTimeoutMS=3000)
+        client.admin.command("ping")
+        return client[db_name][col_name]
     except Exception:
         return None
 
-@st.cache_resource
-def load_local_ml_pipeline():
-    return joblib.load(VEC_PATH), joblib.load(CLF_PATH)
 
-@st.cache_data
-def load_sample_tickets():
-    return pd.read_csv(SAMPLE_CSV_PATH, encoding="utf-8") if os.path.exists(SAMPLE_CSV_PATH) else None
+def save_triage_record(record: Dict[str, Any]) -> None:
+    """Saves a triage record to MongoDB and session history."""
+    record_copy = dict(record)
+    record_copy["timestamp"] = datetime.now(timezone.utc).isoformat()
+    st.session_state["triage_history"].append(record_copy)
 
-chat_model = load_chat_model()
-gemini_available = chat_model is not None
-vectorizer, validator = load_local_ml_pipeline()
-sample_df = load_sample_tickets()
-
-@st.cache_resource
-def init_mongo():
-    try:
-        client = MongoClient(st.secrets["MONGO_URI"], serverSelectionTimeoutMS=5000, tlsCAFile=certifi.where())
-        client.admin.command('ping')
-        db = client["bugtriage_nlp_db"]
-        db.sessions.create_index("session_id", unique=True)
-        db.sessions.create_index("user_email")
-        db.sessions.create_index([("timestamp", -1)])
-        return db
-    except Exception as e:
-        st.sidebar.error(f"Failed to connect to MongoDB: {e}")
-        return None
-
-db = init_mongo()
-
-def create_session(session_id, user_email, bug_report, prediction, confidence, coherence_status="COHERENT", coherence_reason="", p1_ms=0, p2_ms=0):
-    if db is None: return
-    title = bug_report.replace('\n', ' ').strip()[:35] + "..." if len(bug_report) > 35 else bug_report
-    doc = {
-        "session_id": session_id,
-        "user_email": user_email,
-        "title": title,
-        "bug_report": bug_report,
-        "prediction": prediction,
-        "confidence": confidence,
-        "coherence_status": coherence_status,
-        "coherence_reason": coherence_reason,
-        "phase1_ms": p1_ms,
-        "phase2_ms": p2_ms,
-        "timestamp": datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S")
-    }
-    db.sessions.update_one({"session_id": session_id}, {"$set": doc}, upsert=True)
-
-def save_message(session_id, role, content):
-    if db is None: return
-    db.chat_history.insert_one({
-        "session_id": session_id,
-        "role": role,
-        "content": content,
-        "timestamp": datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S")
-    })
-
-def check_for_duplicates(current_text, current_session_id):
-    if db is None: return []
-    past_sessions = list(db.sessions.find({"session_id": {"$ne": current_session_id}}, {"bug_report": 1, "title": 1, "session_id": 1}))
-    if not past_sessions: return []
-    
-    past_texts = [s.get("bug_report", "") for s in past_sessions]
-    vec_current = vectorizer.transform([current_text])
-    vec_past = vectorizer.transform(past_texts)
-    sim_scores = cosine_similarity(vec_current, vec_past)[0]
-    
-    duplicates = []
-    for idx, score in enumerate(sim_scores):
-        if score >= 0.85:
-            duplicates.append({"title": past_sessions[idx].get("title"), "score": round(score * 100, 2)})
-    return sorted(duplicates, key=lambda x: x["score"], reverse=True)
-
-def predict_component_local(text):
-    text_lower = text.lower()
-    if any(w in text_lower for w in ["database", "sql", "mongo", "query", "table"]): return "Backend / Database"
-    if any(w in text_lower for w in ["ui", "button", "css", "frontend", "design", "color"]): return "Frontend / UI"
-    if any(w in text_lower for w in ["api", "timeout", "network", "server", "endpoint", "500"]): return "Network / API"
-    return "Core / Uncategorized"
-
-def evaluate_phase1_structure(report_text: str):
-    clean_input = report_text.strip()
-    text_lower = clean_input.lower()
-    
-    features = vectorizer.transform([clean_input])
-    proba = validator.predict_proba(features)[0]
-    classes = list(validator.classes_)
-
-    valid_idx = classes.index("Valid") if "Valid" in classes else (classes.index(1) if 1 in classes else -1)
-    valid_conf = round(float((proba[valid_idx] * 100) if valid_idx != -1 else (max(proba) * 100)), 2)
-
-    has_structure = (("steps" in text_lower or "reproduce" in text_lower) and ("expected" in text_lower or "actual" in text_lower))
-
-    if len(clean_input.split()) < 15:
-        return "Missing_Details", valid_conf
-    if valid_conf >= 50.0 or (has_structure and valid_conf >= 40.0):
-        return "Valid", valid_conf
-    return "Missing_Details", valid_conf
-
-
-# PHASE 2: LOCAL COHERENCE CHECKER + OPTIONAL GEMINI
-
-SOFTWARE_TERMS = {
-    "software", "system", "application", "app", "website", "webpage",
-    "browser", "database", "sql", "mongo", "api", "endpoint", "server",
-    "network", "request", "response", "login", "logout", "authentication",
-    "authorization", "password", "account", "user", "button", "form",
-    "interface", "ui", "ux", "frontend", "backend", "function", "feature",
-    "code", "program", "script", "error", "exception", "crash", "bug",
-    "defect", "issue", "page", "screen", "upload", "download", "file",
-    "query", "table", "timeout", "loading", "submit", "save", "install",
-    "version", "mobile", "android", "ios", "test", "testing", "performance",
-    "configuration", "cache", "permission", "data"
-}
-EXPECTED_TERMS = ["expected", "should", "intended", "expected result", "expected behavior"]
-ACTUAL_TERMS = ["actual", "observed", "currently", "instead", "actual result", "actual behavior"]
-STEP_TERMS = ["steps to reproduce", "reproduction steps", "steps", "step 1", "reproduce", "when i"]
-
-CONTRADICTION_RULES = [
-    (r"\b(?:can|able to|successfully)\s+(?:log in|login)\b",
-     r"\b(?:cannot|can't|unable to|fails to)\s+(?:log in|login)\b",
-     "Conflicting login claims"),
-    (r"\b(?:data|record|changes?)\s+(?:is|are)?\s*(?:saved|stored)\b",
-     r"\b(?:data|record|changes?)\s+(?:is|are)?\s*(?:not saved|not stored|unsaved)\b",
-     "Conflicting data-persistence claims"),
-    (r"\b(?:button|control)\s+(?:is|appears)?\s*enabled\b",
-     r"\b(?:button|control)\s+(?:is|appears)?\s*disabled\b",
-     "Conflicting button-state claims"),
-    (r"\b(?:page|application|system)\s+(?:loads|opens|works|responds)\b",
-     r"\b(?:page|application|system)\s+(?:does not load|doesn't load|fails to open|is not responding)\b",
-     "Conflicting system-state claims"),
-    (r"\b(?:user|admin)\s+(?:has|have)\s+access\b",
-     r"\b(?:user|admin)\s+(?:does not|doesn't|has no)\s+access\b",
-     "Conflicting access claims"),
-]
-
-def _has_any(text, phrases):
-    return any(p in text for p in phrases)
-
-def calculate_relevance_score(text):
-    lower = text.lower()
-    matched = sorted({
-        term for term in SOFTWARE_TERMS
-        if re.search(r"\b" + re.escape(term) + r"\b", lower)
-    })
-    patterns = [
-        r"\bhttps?://", r"\b(?:500|404|401|403|502|503)\b",
-        r"\b(?:exception|traceback|stack trace|failed|failure)\b",
-        r"\b(?:click|tap|select|enter|navigate|open|submit)\b",
-    ]
-    pattern_hits = sum(bool(re.search(p, lower)) for p in patterns)
-    score = min(75, len(matched) * 7.5)
-    score += min(15, pattern_hits * 5)
-    if _has_any(lower, EXPECTED_TERMS + ACTUAL_TERMS + STEP_TERMS):
-        score += 10
-    return round(min(100, score), 1), matched
-
-def calculate_sentence_similarity(text):
-    sentences = [
-        re.sub(r"\s+", " ", x).strip()
-        for x in re.split(r"(?<=[.!?])\s+|\n+", text)
-        if len(x.strip().split()) >= 3
-    ]
-    if len(sentences) < 2:
-        return None
-    try:
-        local_vec = TfidfVectorizer(stop_words="english", ngram_range=(1, 2))
-        matrix = local_vec.fit_transform(sentences)
-        sim = cosine_similarity(matrix)
-        vals = [float(sim[i, j]) for i in range(len(sentences))
-                for j in range(i + 1, len(sentences))]
-        return round(100 * sum(vals) / len(vals), 1) if vals else None
-    except ValueError:
-        return None
-
-def detect_contradictions(text):
-    lower = text.lower()
-    findings = []
-    for positive, negative, label in CONTRADICTION_RULES:
-        if re.search(positive, lower) and re.search(negative, lower):
-            findings.append(label)
-
-    expected = re.search(
-        r"(?:expected(?: result| behavior)?|should be)\s*[:\-]?\s*(.{5,180})",
-        lower
-    )
-    actual = re.search(
-        r"(?:actual(?: result| behavior)?|observed)\s*[:\-]?\s*(.{5,180})",
-        lower
-    )
-    if expected and actual:
-        e, a = expected.group(1), actual.group(1)
-        opposites = [
-            ("visible", "not visible"), ("displayed", "not displayed"),
-            ("enabled", "disabled"), ("successful", "failed"),
-            ("accepted", "rejected"), ("present", "missing"),
-            ("connected", "disconnected"), ("saved", "not saved"),
-        ]
-        for positive, negative in opposites:
-            if ((positive in e and negative in a) or
-                (negative in e and positive in a)):
-                findings.append(f"Expected and actual conflict: {positive}/{negative}")
-    return list(dict.fromkeys(findings))
-
-def verify_semantic_coherence(bug_report: str, use_gemini=False):
-    text = (bug_report or "").strip()
-    lower = text.lower()
-    words = re.findall(r"\b\w+\b", text)
-    
-    # Initialize scope variables to prevent UnboundLocalError
-    confidence = 50.0
-    metrics = {
-        "relevance": 0.0, "similarity": None,
-        "contradictions": [], "matched_terms": [],
-        "word_count": len(words), "has_steps": False,
-        "has_expected": False, "has_actual": False,
-        "absurd_hits": 0
-    }
-
-    if not text:
-        return "UNVERIFIED", "No report provided.", confidence, metrics
-
-    relevance, matched = calculate_relevance_score(text)
-    similarity = calculate_sentence_similarity(text)
-    contradictions = detect_contradictions(text)
-    
-    absurd_patterns = [
-        r"\b(?:toaster|bread|pumpernickel|celery|potato|soup|seagulls|purple|caramelize|origami|swan|hieroglyphics)\b",
-        r"\b(?:smells like|tastes like|singing|humming|stare intensely|facing north|whisper a polite apology)\b",
-        r"\b(?:sentient|unionized|smooth jazz|victorian ghost|sun blowing up|line of time)\b",
-        r"\b(?:windows 1998 se|soup edition)\b"
-    ]
-    absurd_hits = [p for p in absurd_patterns if re.search(p, lower)]
-    
-    has_expected = _has_any(lower, EXPECTED_TERMS)
-    has_actual = _has_any(lower, ACTUAL_TERMS)
-    has_steps = _has_any(lower, STEP_TERMS)
-    section_count = sum([has_expected, has_actual, has_steps])
-
-    confidence = 25 + min(30, relevance * .30) + section_count * 10
-    if similarity is not None:
-        confidence += min(15, similarity * .15)
-    if len(words) >= 30:
-        confidence += 5
-    if contradictions or absurd_hits:
-        confidence = max(confidence, 75)
-    confidence = round(min(95, confidence), 1)
-
-    metrics.update({
-        "relevance": relevance, "similarity": similarity,
-        "contradictions": contradictions, "matched_terms": matched,
-        "has_steps": has_steps, "has_expected": has_expected, 
-        "has_actual": has_actual, "absurd_hits": len(absurd_hits)
-    })
-
-    if use_gemini and chat_model is not None:
-        prompt = (
-            "You are a zero-tolerance software quality assurance gatekeeper.\n\n"
-            f"Analyze this defect report word-for-word:\n\"\"\"{text}\"\"\"\n\n"
-            "EVALUATION INSTRUCTIONS:\n"
-            "1. Scan the text for ANY slang, pop-culture references, jokes, song lyrics, or physically impossible events (e.g., database caramelizing, browser made of bread), no matter how much valid technical code is present.\n"
-            "2. If you find EVEN ONE such phrase, your verdict MUST be CONTRADICTORY.\n"
-            "3. Only output COHERENT if 100% of the text describes a legitimate software problem or configuration.\n\n"
-            "Respond EXACTLY in this format:\n"
-            "VERDICT: [COHERENT or CONTRADICTORY]\n"
-            "REASON: [If contradictory, quote the exact bad phrase. If coherent, write 'Semantic logic verified']"
-        )
+    col = get_mongo_collection()
+    if col is not None:
         try:
-            response = chat_model.generate_content(
-                prompt,
-                generation_config=genai.types.GenerationConfig(
-                    temperature=0.0, max_output_tokens=300
-                ),
-                request_options={"timeout": 15.0},
-            )
-            res = response.text.upper()
-            verdict = "CONTRADICTORY" if "CONTRADICTORY" in res else "COHERENT"
-            
-            reason = "Semantic logic verified."
-            for line in response.text.splitlines():
-                if "REASON:" in line.upper():
-                    reason = line.split(":", 1)[-1].replace("**", "").strip()
-                    break
-            return verdict, reason, max(confidence, 85), metrics
-        except Exception as exc:
-            metrics["gemini_error"] = type(exc).__name__
+            col.insert_one(dict(record_copy))
+        except Exception:
+            pass
 
-    if absurd_hits:
-        return "CONTRADICTORY", "Local anomaly rule: Detected surreal, satirical, or physically impossible claims (e.g., sentient hardware or absurd environmental steps).", confidence, metrics
 
-    if contradictions:
-        return "CONTRADICTORY", "Local contradiction rule(s): " + "; ".join(contradictions), confidence, metrics
-    if len(words) < 15:
-        return "UNVERIFIED", "Report is too short for reliable checking. Manual review required.", min(confidence, 45), metrics
-    if relevance < 20:
-        return "UNVERIFIED", "Low software relevance score. Manual review required.", min(confidence, 50), metrics
-    if section_count < 2:
-        return "UNVERIFIED", "Insufficient expected/actual/steps evidence. Manual review required.", min(confidence, 60), metrics
+def load_triage_records() -> List[Dict[str, Any]]:
+    """Loads triage records from MongoDB if available, merged with session history."""
+    col = get_mongo_collection()
+    records: List[Dict[str, Any]] = []
+    if col is not None:
+        try:
+            cursor = col.find({}, {"_id": 0}).sort("timestamp", -1).limit(200)
+            records = list(cursor)
+        except Exception:
+            records = []
+    if not records:
+        records = list(reversed(st.session_state.get("triage_history", [])))
+    return records
 
-    return "COHERENT", "Local checks passed. This does not guarantee semantic correctness.", confidence, metrics
 
-def generate_ai_response(user_question, bug_report_context, prediction_status, guideline_text="", stream=True):
-    if not bug_report_context.strip(): return "I do not have a bug report to look at yet."
-    prompt = f"Date: {datetime.now().strftime('%Y-%m-%d')}\nStatus: {prediction_status}\nRaw Report:\n\"\"\"{bug_report_context}\"\"\"\nTask: {user_question}\nEnsure components: Severity, Routing, Steps, Root Cause."
-    
-    try:
-        if chat_model is None:
-            raise RuntimeError("Gemini unavailable or API key not configured.")
-        return chat_model.generate_content(prompt, stream=stream, generation_config=genai.types.GenerationConfig(temperature=0.2, max_output_tokens=2048))
-    except Exception as e:
-        local_route = predict_component_local(bug_report_context)
-        fallback = (
-            f"### ⚠️ [Semantic AI Offline - Standardized by Local Fallback]\n\n"
-            f"**Assigned Routing Component:** `{local_route}`\n"
-            f"**Validation Status:** {prediction_status}\n\n"
-            f"#### Raw Description:\n{bug_report_context}\n\n"
-            f"> *Note: Gemini API timed out. Structural data was preserved using localized NLP components.*"
+# ==============================================================================
+# 6. SESSION STATE INITIALIZATION
+# ==============================================================================
+if "prd_text" not in st.session_state:
+    st.session_state["prd_text"] = ""
+if "prd_filename" not in st.session_state:
+    st.session_state["prd_filename"] = ""
+if "guidelines_text" not in st.session_state:
+    st.session_state["guidelines_text"] = ""
+if "phase1_result" not in st.session_state:
+    st.session_state["phase1_result"] = None
+if "combined_check_result" not in st.session_state:
+    st.session_state["combined_check_result"] = None
+if "generated_ticket" not in st.session_state:
+    st.session_state["generated_ticket"] = None
+if "triage_history" not in st.session_state:
+    st.session_state["triage_history"] = []
+
+
+# ==============================================================================
+# 7. MAIN UI & WORKFLOW
+# ==============================================================================
+st.title("🐞 BugTriage-NLP")
+st.caption(
+    f"Hybrid Defect Report Validation & Triage • Phase 1 (TF-IDF + Logistic Regression) "
+    f"• Phase 2 ({GEMINI_MODEL_NAME}) • PRD & Coherency Verification"
+)
+
+vectorizer, clf = build_local_classifier()
+gemini_client, gemini_init_err = get_gemini_client()
+existing_records = load_triage_records()
+
+tab_triage, tab_dashboard = st.tabs(["🧪 Defect Triage Workspace", "📊 QA Manager Dashboard"])
+
+with tab_triage:
+    col_left, col_right = st.columns([1.05, 1.25], gap="large")
+
+    with col_left:
+        st.subheader("1. PRD & QA Formatting Requirements (Required)")
+        prd_file = st.file_uploader(
+            "Upload Product Requirements Document (.txt, .pdf, .docx)",
+            type=["txt", "pdf", "docx"],
+            key="prd_uploader",
         )
-        return fallback
-
-def export_to_external_system(custom_title, custom_desc, prediction, confidence, coherence_status, github_repo, access_token, user_info):
-    val_text = f"### 🤖 Automated Triage Validation\n- **Phase 1 (Structural):** `{prediction}` ({confidence}% confidence)\n"
-    if coherence_status and coherence_status != "PENDING":
-        val_text += f"- **Phase 2 (Semantic):** `{coherence_status}`\n"
-    signature = f"\n\n---\n*Reported via BugTriage-NLP by **{user_info.get('name', 'Unknown')}** ({user_info.get('email', '')})*"
-    issue_body = val_text + "\n---\n\n" + custom_desc + signature
-
-    if not access_token or not github_repo: return False, "Missing token or Repo name."
-    url = f"https://api.github.com/repos/{github_repo}/issues"
-    headers = {"Authorization": f"Bearer {access_token}", "Accept": "application/vnd.github+json"}
-    
-    try:
-        resp = requests.post(url, headers=headers, json={"title": custom_title, "body": issue_body, "labels": ["bug", "triage-validated"]}, timeout=10)
-        if resp.status_code in (200, 201): return True, f"Ticket successfully exported to: {resp.json().get('html_url', '')}"
-        return False, f"GitHub API Error ({resp.status_code}): {resp.text}"
-    except Exception as e: return False, f"Connection error: {e}"
-
-def start_new_chat(preserve_draft=""):
-    st.session_state.session_id = str(uuid.uuid4())
-    st.session_state.messages = []
-    st.session_state.draft_report = preserve_draft
-    st.session_state.prd_text = ""  # <-- Added this line to clear PRD
-    for key in ["current_report", "prediction", "confidence", "coherence_status", "coherence_reason", "phase1_ms", "phase2_ms", "duplicates", "coherence_confidence", "coherence_details"]:
-        if key in st.session_state: del st.session_state[key]
-
-
-# UI RENDERING
-
-
-if "session_id" not in st.session_state: st.session_state.session_id = str(uuid.uuid4())
-if "messages" not in st.session_state: st.session_state.messages = []
-if "prd_text" not in st.session_state: st.session_state.prd_text = ""
-
-with st.sidebar:
-    if st.button("New Chat", use_container_width=True, type="primary"):
-        start_new_chat()
-        st.rerun()
-
-    st.divider()
-    if st.session_state.user is not None:
-        st.header("Your Chat History")
-        if db is not None:
-            sessions = list(db.sessions.find({"user_email": st.session_state.user["email"]}, {"session_id": 1, "title": 1, "timestamp": 1, "_id": 0}).sort("timestamp", -1))
-            if sessions:
-                with st.container(height=400):
-                    for doc in sessions:
-                        if st.button(f"{doc['title']} ({doc['timestamp'].split()[0]})", key=doc['session_id'], use_container_width=True):
-                            sess_data = db.sessions.find_one({"session_id": doc['session_id']})
-                            st.session_state.update({
-                                "session_id": doc['session_id'], "current_report": sess_data.get("bug_report", ""),
-                                "prediction": sess_data.get("prediction", ""), "confidence": sess_data.get("confidence", 0.0),
-                                "coherence_status": sess_data.get("coherence_status", "COHERENT"), "coherence_reason": sess_data.get("coherence_reason", ""),
-                                "phase1_ms": sess_data.get("phase1_ms", 0), "phase2_ms": sess_data.get("phase2_ms", 0)
-                            })
-                            msgs = list(db.chat_history.find({"session_id": doc['session_id']}).sort("timestamp", 1))
-                            st.session_state.messages = [{"role": m["role"], "content": m["content"]} for m in msgs]
-                            st.rerun()
-    else:
-        st.info("🔒 Sign in above to view history.")
-
-st.title("BugTriage-NLP")
-st.markdown("**Automated Defect Report Validation and Triage Assistant**")
-st.caption("Gemini available" if gemini_available else "Offline-capable mode · Gemini is optional")
-
-tab_workspace, tab_dashboard = st.tabs(["🛠️ Triage Workspace", "📊 QA Manager Dashboard"])
-
-with tab_workspace:
-    # --- NEW: STRICT PRD UPLOAD GATEKEEPER ---
-    st.markdown("### Step 1: Upload Requirements (PRD)")
-    if not st.session_state.get("prd_text"):
-        st.info("⚠️ You must upload a reference document (PRD) before you can analyze a bug report.")
-        uploaded_prd = st.file_uploader("Upload PRD (PDF, Word, TXT)", type=['pdf', 'docx', 'txt'], label_visibility="collapsed")
-        if uploaded_prd:
-            st.session_state.prd_text = extract_text_from_file(uploaded_prd)
-            if st.session_state.prd_text:
-                st.success("✅ Requirements loaded! You can now analyze reports.")
-                st.rerun()
-        st.stop() # Stops the rest of the page from rendering until PRD is uploaded
-    else:
-        col_prd1, col_prd2 = st.columns([3, 1])
-        with col_prd1: st.success("✅ Reference Document is actively loaded.")
-        with col_prd2:
-            if st.button("Clear PRD", use_container_width=True):
-                st.session_state.prd_text = ""
-                st.rerun()
-    st.divider()
-
-    # --- STEP 2: BUG REPORT ANALYSIS (Only runs if PRD is loaded) ---
-    st.markdown("### Step 2: Defect Triage")
-    if "current_report" not in st.session_state:
-        st.write("Input the defect description below to run Phase 1 structural validation.")
-        default_text = st.session_state.get("draft_report", "")
-        if sample_df is not None:
-            opts = ["-- Type manually --"] + [f"Ticket #{i+1}: {r[sample_df.columns[0]]}" for i, r in sample_df.iterrows()]
-            sel = st.selectbox("Load sample ticket:", opts)
-            if sel != "-- Type manually --": default_text = str(sample_df.iloc[int(sel.split("#")[1].split(":")[0])-1][sample_df.columns[-1]])
-            
-        user_input = st.text_area("Defect Description", value=default_text, height=150, label_visibility="collapsed")
-
-        if st.button("Analyze Report", use_container_width=True, type="primary"):
-            if user_input.strip():
-                t0 = time.time()
-                clean_input = user_input.strip()
-                final_prediction, valid_conf = evaluate_phase1_structure(clean_input)
-                t1 = time.time()
-                
-                st.session_state.update({
-                    "current_report": clean_input, "prediction": final_prediction, 
-                    "confidence": valid_conf, "coherence_status": "PENDING", 
-                    "phase1_ms": int((t1 - t0) * 1000), "duplicates": check_for_duplicates(clean_input, st.session_state.session_id)
-                })
-                email = st.session_state.user["email"] if st.session_state.user else "anonymous"
-                create_session(st.session_state.session_id, email, clean_input, final_prediction, valid_conf, p1_ms=st.session_state.phase1_ms)
-                st.rerun()
-            else: st.warning("Enter a defect description.")
-    else:
-        with st.expander("View Active Defect Report Context"): st.write(st.session_state.current_report)
-
-        if st.session_state.get("duplicates"):
-            st.warning(f"⚠️ **Potential Duplicates Found:** Similarity >85% with {len(st.session_state.duplicates)} past report(s).")
-            for dup in st.session_state.duplicates: st.caption(f"- {dup['title']} ({dup['score']}%)")
-
-        col1, col2, col3 = st.columns([1.2, 1.2, 1])
-        with col1:
-            st.caption(f"Phase 1: Validation ({st.session_state.get('phase1_ms', 0)}ms)")
-            if st.session_state.prediction == "Valid": st.success(f"Valid Structure ({st.session_state.confidence}%)")
-            else: st.error(f"Missing Details ({st.session_state.confidence}%)")
-            
-            if st.button("🔄 Re-run Phase 1", use_container_width=True):
-                with st.spinner("Re-evaluating structural integrity..."):
-                    t0 = time.time()
-                    final_prediction, valid_conf = evaluate_phase1_structure(st.session_state.current_report)
-                    t1 = time.time()
-                    st.session_state.update({
-                        "prediction": final_prediction,
-                        "confidence": valid_conf,
-                        "phase1_ms": int((t1 - t0) * 1000)
-                    })
-                    email = st.session_state.user["email"] if st.session_state.user else "anonymous"
-                    create_session(st.session_state.session_id, email, st.session_state.current_report, final_prediction, valid_conf, p1_ms=st.session_state.phase1_ms, p2_ms=st.session_state.get("phase2_ms", 0))
-                    st.success("Phase 1 re-evaluated successfully!")
-                    st.rerun()
-
-        if st.session_state.prediction == "Missing_Details":
-            with col2:
-                st.caption("Phase 2: Semantic Verification")
-                st.warning("Skipped (Blocked by Phase 1)")
-            st.warning("Revision Required: Score below threshold. Add clear Steps, Expected, and Actual results.")
-            if st.button("Revise & Resubmit", type="primary"):
-                start_new_chat(preserve_draft=st.session_state.current_report)
-                st.rerun()
-        else:
-            with col2:
-                p2_ms = st.session_state.get('phase2_ms', 0)
-                st.caption(f"Phase 2: Semantic Check {'('+str(p2_ms)+'ms)' if p2_ms else ''}")
-                use_gemini_phase2 = st.checkbox(
-                    "Use Gemini for enhanced semantic review",
-                    value=False,
-                    disabled=not gemini_available,
-                    help="Local checks always run. Gemini is optional."
-                )
-                if not gemini_available:
-                    st.caption("Gemini unavailable — local checker is ready.")
-
-                btn_label = "Run Coherence Check" if st.session_state.get("coherence_status", "PENDING") == "PENDING" else "🔄 Re-run Coherence Check"
-                
-                if st.button(btn_label, type="secondary", use_container_width=True):
-                    with st.spinner("Running coherence checks..."):
-                        t0 = time.time()
-                        verdict, reason, p2_confidence, p2_metrics = verify_semantic_coherence(
-                            st.session_state.current_report,
-                            use_gemini=use_gemini_phase2
-                        )
-                        t1 = time.time()
-                        st.session_state.update({
-                            "coherence_status": verdict,
-                            "coherence_reason": reason,
-                            "coherence_confidence": p2_confidence,
-                            "coherence_details": p2_metrics,
-                            "phase2_ms": int((t1 - t0) * 1000)
-                        })
-                        create_session(
-                            st.session_state.session_id,
-                            st.session_state.user["email"] if st.session_state.user else "anonymous",
-                            st.session_state.current_report,
-                            st.session_state.prediction,
-                            st.session_state.confidence,
-                            verdict, reason,
-                            st.session_state.phase1_ms,
-                            st.session_state.phase2_ms
-                        )
-                        st.rerun()
-
-                if st.session_state.get("coherence_status") == "CONTRADICTORY":
-                    st.error(f"Flagged: {st.session_state.coherence_reason}")
-                    st.metric("Coherence confidence", f"{st.session_state.get('coherence_confidence', 0)}%")
-                elif st.session_state.get("coherence_status") == "UNVERIFIED":
-                    st.warning(f"Manual review required: {st.session_state.coherence_reason}")
-                    st.metric("Coherence confidence", f"{st.session_state.get('coherence_confidence', 0)}%")
-                elif st.session_state.get("coherence_status") == "PENDING":
-                    st.info("Awaiting Coherence Verification")
-                else:
-                    st.success(st.session_state.coherence_reason)
-                    st.metric("Coherence confidence", f"{st.session_state.get('coherence_confidence', 0)}%")
-
-                if st.session_state.get("coherence_details"):
-                    with st.expander("View local coherence metrics"):
-                        details = st.session_state.coherence_details
-                        st.metric("Software relevance", f"{details.get('relevance', 0)}%")
-                        sim = details.get("similarity")
-                        st.metric("Sentence similarity", "Not available" if sim is None else f"{sim}%")
-                        st.caption("Matched terms: " + (", ".join(details.get("matched_terms", [])) or "None"))
-
-            with col3:
-                st.caption("Phase 3: External Routing")
-                if st.session_state.user:
-                    target_repo = st.text_input("Target Repo", placeholder="owner/repo")
-                    custom_title = st.text_input("Issue Title", value=f"[BugTriage] {st.session_state.current_report.splitlines()[0][:65]}")
-                    latest_ai = next((m["content"] for m in reversed(st.session_state.messages) if m["role"] == "assistant"), f"#### Raw Report\n{st.session_state.current_report}")
-                    custom_desc = st.text_area("Issue Description", value=latest_ai, height=100)
-                    
-                    if st.button("Export to GitHub", type="primary"):
-                        with st.spinner("Exporting..."):
-                            success, msg = export_to_external_system(custom_title, custom_desc, st.session_state.prediction, st.session_state.confidence, st.session_state.coherence_status, target_repo, st.session_state.user["access_token"], st.session_state.user)
-                            if success: st.success(msg)
-                            else: st.error(msg)
-                else: st.info("🔒 Sign in to export.")
-
-        # --- AI ASSISTANT CLEANUP ---
-        st.markdown("### 🤖 Triage Assistant & PRD Verification")
-        col_ai1, col_ai2 = st.columns(2)
-        
-        with col_ai1:
-            st.markdown("#### Standard Route")
-            if st.button("Standardize & Route via AI", use_container_width=True):
-                msg = "Standardize this bug report. Identify Severity, Component Routing, and Root Cause."
-                st.session_state.messages.append({"role": "user", "content": msg})
-                save_message(st.session_state.session_id, "user", msg)
-                
-                resp = generate_ai_response(msg, st.session_state.current_report, st.session_state.prediction, stream=True)
-                if isinstance(resp, str): 
-                    st.session_state.messages.append({"role": "assistant", "content": resp})
-                else:
-                    def stream_gen():
-                        full = ""
-                        for chunk in resp:
-                            if chunk.text:
-                                full += chunk.text
-                                yield chunk.text
-                        save_message(st.session_state.session_id, "assistant", full)
-                        st.session_state.messages.append({"role": "assistant", "content": full})
-                    st.write_stream(stream_gen)
-                st.rerun()
-
-        with col_ai2:
-            st.markdown("#### Requirement Cross-Check")
-            # Since the PRD upload is enforced at the top, we just need the Verify button here.
-            if gemini_available:
-                if st.button("Verify against Reference", use_container_width=True, type="primary"):
-                    msg = "Verify this bug report's 'Expected Behavior' against the uploaded Product Requirements Document (PRD)."
-                    st.session_state.messages.append({"role": "user", "content": msg})
-                    
-                    prompt = (
-                        "You are a strict QA Lead. Compare the following Bug Report against the provided Product Requirements Document (PRD).\n\n"
-                        "INSTRUCTIONS:\n"
-                        "1. Verify if the 'Expected Behavior' in the bug report aligns with the PRD.\n"
-                        "2. State whether the bug is valid (a real deviation from requirements) or invalid (works as designed according to the PRD).\n"
-                        "3. Quote the specific section of the PRD that proves your point.\n\n"
-                        f"--- PRD EXTRACT ---\n{st.session_state.prd_text[:12000]}\n\n"
-                        f"--- BUG REPORT ---\n{st.session_state.current_report}"
-                    )
-                    
-                    try:
-                        with st.spinner("Cross-referencing business rules..."):
-                            resp = chat_model.generate_content(prompt)
-                            st.session_state.messages.append({"role": "assistant", "content": resp.text})
-                            save_message(st.session_state.session_id, "assistant", resp.text)
-                    except Exception as e:
-                        fallback_msg = f"⚠️ **PRD Verification Failed (AI Offline)**\n\nUnable to reach Gemini API. Error details: `{type(e).__name__}`"
-                        st.session_state.messages.append({"role": "assistant", "content": fallback_msg})
-                        save_message(st.session_state.session_id, "assistant", fallback_msg)
-                    st.rerun()
+        if prd_file is not None:
+            parsed_prd, parse_err = extract_uploaded_text(prd_file)
+            if parse_err:
+                st.error(parse_err)
             else:
-                st.warning("Gemini API is unavailable. Cannot run PRD verification.")
+                st.session_state["prd_text"] = parsed_prd
+                st.session_state["prd_filename"] = prd_file.name
+                st.success(f"Loaded PRD: **{prd_file.name}** ({len(parsed_prd)} chars)")
 
-        for m in st.session_state.messages:
-            with st.chat_message(m["role"]): st.markdown(m["content"])
+        guide_file = st.file_uploader(
+            "Optional Custom QA Formatting Guidelines (.txt, .pdf, .docx)",
+            type=["txt", "pdf", "docx"],
+            key="guidelines_uploader",
+        )
+        if guide_file is not None:
+            parsed_guide, g_err = extract_uploaded_text(guide_file)
+            if g_err:
+                st.warning(g_err)
+            else:
+                st.session_state["guidelines_text"] = parsed_guide
+                st.info(f"Loaded Guidelines: **{guide_file.name}**")
+
+        with st.expander("Preview Loaded PRD Text", expanded=False):
+            st.text_area(
+                "PRD Content",
+                value=st.session_state["prd_text"],
+                height=160,
+                disabled=True,
+                label_visibility="collapsed",
+            )
+
+        st.divider()
+        st.subheader("2. Raw Defect Report Input")
+        bug_input = st.text_area(
+            "Enter or paste the raw defect report",
+            height=190,
+            placeholder=(
+                "Example: Steps to reproduce: 1. Open Checkout. 2. Apply expired coupon. "
+                "Expected: Reject coupon with error message. Actual: Discount applied anyway."
+            ),
+            key="bug_report_input",
+        )
+
+        btn_p1, btn_combined = st.columns(2)
+
+        with btn_p1:
+            run_p1_clicked = st.button(
+                "Run Phase 1 Check",
+                key="btn_phase1",
+                use_container_width=True,
+            )
+
+        with btn_combined:
+            run_combined_clicked = st.button(
+                "Check Coherency & Requirements",
+                key="btn_check_coherency_and_req",
+                type="primary",
+                use_container_width=True,
+            )
+
+        if run_p1_clicked:
+            p1_res = run_phase1_validation(
+                bug_text=bug_input,
+                vectorizer=vectorizer,
+                clf=clf,
+                historical_reports=existing_records,
+            )
+            st.session_state["phase1_result"] = p1_res
+
+        if run_combined_clicked:
+            p1_res = run_phase1_validation(
+                bug_text=bug_input,
+                vectorizer=vectorizer,
+                clf=clf,
+                historical_reports=existing_records,
+            )
+            st.session_state["phase1_result"] = p1_res
+
+            comb_res = evaluate_coherency_and_requirements(
+                client=gemini_client,
+                bug_report_text=bug_input,
+                prd_text=st.session_state.get("prd_text", ""),
+                guidelines_text=st.session_state.get("guidelines_text", ""),
+            )
+            st.session_state["combined_check_result"] = comb_res
+
+            ticket_data, p2_ms, p2_fallback = generate_structured_ticket(
+                client=gemini_client,
+                bug_report_text=bug_input,
+                prd_text=st.session_state.get("prd_text", ""),
+                guidelines_text=st.session_state.get("guidelines_text", ""),
+                check_result=comb_res,
+            )
+            st.session_state["generated_ticket"] = ticket_data
+
+            save_triage_record(
+                {
+                    "raw_report": bug_input,
+                    "prd_filename": st.session_state.get("prd_filename", "None"),
+                    "phase1_status": p1_res["status"],
+                    "phase1_confidence": p1_res["confidence"],
+                    "phase1_ms": p1_res["elapsed_ms"],
+                    "combined_status": comb_res["status_label"],
+                    "coherent": comb_res["coherent"],
+                    "follows_requirements": comb_res["follows_requirements"],
+                    "combined_ms": comb_res["elapsed_ms"],
+                    "phase2_ms": p2_ms,
+                    "fallback_used": comb_res["fallback_used"] or p2_fallback,
+                    "ticket_title": ticket_data.get("ticket_title", ""),
+                    "severity": ticket_data.get("severity", "Medium"),
+                    "component": ticket_data.get("component", "General"),
+                }
+            )
+
+    with col_right:
+        st.subheader("3. Validation, Coherency & Requirements Results")
+
+        if gemini_init_err:
+            st.caption(f"ℹ️ {gemini_init_err} — Local fallback mode active when needed.")
+
+        p1 = st.session_state.get("phase1_result")
+        if p1:
+            st.markdown("**Phase 1 — Local Structural & Gatekeeper Check**")
+            if p1["is_absurd"]:
+                st.error(f"🚫 **Absurd / Non-Technical Claim Detected:** {p1['absurd_reason']}")
+            elif p1["status"] == "Valid":
+                st.success(
+                    f"✅ **Structure: Valid** (Confidence: {p1['confidence']}% • {p1['elapsed_ms']} ms)"
+                )
+            else:
+                st.warning(
+                    f"⚠️ **Structure: Missing_Details** (Confidence: {p1['confidence']}% • {p1['elapsed_ms']} ms)"
+                )
+                for hint in p1.get("missing_hints", []):
+                    st.write(f"- {hint}")
+
+            if p1.get("duplicate_match"):
+                dup = p1["duplicate_match"]
+                st.warning(
+                    f"🔁 **Possible Historical Duplicate ({dup['similarity']}% similarity):** "
+                    f"*{dup['matched_title']}* [{dup['matched_component']}]"
+                )
+
+        comb = st.session_state.get("combined_check_result")
+        if comb:
+            st.markdown("**Phase 2 — Combined Coherency & Uploaded PRD Requirements Check**")
+            label = comb["status_label"]
+            detail_line = (
+                f"**Coherency:** {comb['coherency_reason']}  \n"
+                f"**PRD / Requirements:** {comb['requirements_reason']}  \n"
+                f"*Latency: {comb['elapsed_ms']} ms"
+                f"{' • Fallback Mode' if comb.get('fallback_used') else ''}*"
+            )
+
+            if label == "Passed Both":
+                st.success(f"✅ **Passed Both**\n\n{detail_line}")
+            elif label == "Not Coherent":
+                st.error(f"❌ **Not Coherent**\n\n{detail_line}")
+            elif label == "Not Accurate to the Instructions":
+                st.warning(f"⚠️ **Not Accurate to the Instructions**\n\n{detail_line}")
+            elif label == "Not Coherent & Not Accurate to the Instructions":
+                st.error(f"❌⚠️ **Not Coherent & Not Accurate to the Instructions**\n\n{detail_line}")
+            else:
+                st.info(f"ℹ️ **{label}**\n\n{detail_line}")
+
+        ticket = st.session_state.get("generated_ticket")
+        if ticket:
+            st.divider()
+            st.subheader("4. Standardized Developer Ticket")
+            m1, m2, m3 = st.columns(3)
+            m1.metric("Severity", ticket.get("severity", "Medium"))
+            m2.metric("Component", ticket.get("component", "General"))
+            m3.metric("PRD Status", comb["status_label"] if comb else "Pending")
+
+            st.markdown(f"**Title:** {ticket.get('ticket_title', 'Untitled Ticket')}")
+            st.markdown(f"**Probable Root Cause:** {ticket.get('probable_root_cause', 'N/A')}")
+            st.markdown(f"**PRD Alignment Notes:** {ticket.get('prd_alignment_notes', 'N/A')}")
+
+            with st.expander("Formatted Ticket Markdown", expanded=True):
+                st.markdown(ticket.get("formatted_markdown", ""))
+
 
 with tab_dashboard:
-    st.header("System Analytics & Research Data")
-    
-    if st.session_state.user is None:
-        st.warning("🔒 Please sign in with GitHub to view your analytics and performance logs.")
-    elif db is not None:
-        user_email = st.session_state.user["email"]
-        total = db.sessions.count_documents({"user_email": user_email})
-        
-        if total > 0:
-            v_count = db.sessions.count_documents({"user_email": user_email, "prediction": "Valid"})
-            agg_pipeline = [
-                {"$match": {"user_email": user_email}},
-                {"$group": {"_id": None, "avg": {"$avg": "$phase1_ms"}}}
-            ]
-            avg_p1_cursor = list(db.sessions.aggregate(agg_pipeline))
-            avg_p1_result = avg_p1_cursor[0]["avg"] if avg_p1_cursor else None
-            avg_p1_display = round(avg_p1_result, 2) if avg_p1_result is not None else 0
-            
-            m_col1, m_col2, m_col3 = st.columns(3)
-            m_col1.metric("Your Reports Processed", total)
-            m_col2.metric("Valid Structure Rate", f"{round((v_count/total)*100, 1)}%")
-            m_col3.metric("Avg Phase 1 Speed", f"{avg_p1_display} ms")
-            
-            st.subheader("Performance Logs (Research Output)")
-            logs_df = pd.DataFrame(list(db.sessions.find(
-                {"user_email": user_email}, 
-                {"session_id":1, "prediction":1, "phase1_ms":1, "phase2_ms":1, "timestamp":1, "_id":0}
-            )))
-            st.dataframe(logs_df, use_container_width=True)
-        else:
-            st.info("No data available yet. Process some defect reports to generate analytics.")
+    st.subheader("QA Manager Dashboard Analytics")
+    records = load_triage_records()
+
+    if not records:
+        st.info("No triage records logged yet. Run a check in the Triage Workspace to populate metrics.")
     else:
-        st.error("Database connection required for the Dashboard.")
+        df = pd.DataFrame(records)
+        total_runs = len(df)
+        passed_both_count = int((df.get("combined_status") == "Passed Both").sum()) if "combined_status" in df else 0
+        avg_p1_ms = round(float(df["phase1_ms"].mean()), 2) if "phase1_ms" in df else 0.0
+        avg_p2_ms = round(float(df["phase2_ms"].mean()), 2) if "phase2_ms" in df else 0.0
+
+        c1, c2, c3, c4 = st.columns(4)
+        c1.metric("Total Triaged Reports", total_runs)
+        c2.metric("Passed Both Rate", f"{(passed_both_count / total_runs) * 100:.1f}%")
+        c3.metric("Avg Phase 1 Speed", f"{avg_p1_ms} ms")
+        c4.metric("Avg Phase 2 Speed", f"{avg_p2_ms} ms")
+
+        st.dataframe(df, use_container_width=True)
