@@ -8,12 +8,12 @@ from typing import Any, Dict, List, Optional, Tuple
 
 import numpy as np
 import pandas as pd
+import requests
 import streamlit as st
 from sklearn.feature_extraction.text import TfidfVectorizer
 from sklearn.linear_model import LogisticRegression
 from sklearn.metrics.pairwise import cosine_similarity
 
-# Optional dependencies for file parsing, Gemini SDK, and MongoDB
 try:
     from pypdf import PdfReader
 except ImportError:
@@ -23,7 +23,7 @@ except ImportError:
         PdfReader = None
 
 try:
-    import docx  # python-docx
+    import docx
 except ImportError:
     docx = None
 
@@ -39,763 +39,469 @@ except ImportError:
 
 
 # ==============================================================================
-# 1. PAGE CONFIGURATION & THEME
+# CONFIGURATION
 # ==============================================================================
 st.set_page_config(
-    page_title="BugTriage-NLP | Hybrid Defect Validation & Triage",
+    page_title="BugTriage-NLP",
     page_icon="🐞",
     layout="wide",
 )
 
-GEMINI_MODEL_NAME = "gemini-3.8-flash"
+MODEL_NAME = "gemini-3.8-flash"
 DUPLICATE_THRESHOLD = 0.85
 
-
-# ==============================================================================
-# 2. LOCAL PHASE 1 CLASSIFIER, ABSURDITY FILTER & DUPLICATE DETECTOR
-# ==============================================================================
-ABSURDITY_PATTERNS = [
+ABSURD_PATTERNS = [
     r"\b(flat earth|aliens?|time travel|teleport|unicorn|dragon|magic spell|zombie)\b",
-    r"\b(gravity reversed|physics broke|universe exploded|my coffee brewed itself)\b",
-    r"\b(lol+ right now|just kidding|jk+|meme bug|april fools)\b",
-    r"\b(1000000% cpu|9999999 gb ram|infinite loop that froze time)\b",
+    r"\b(gravity reversed|physics broke|universe exploded)\b",
+    r"\b(lol+ right now|just kidding|jk+|april fools)\b",
 ]
 
 
-def is_absurd_report(text: str) -> Tuple[bool, str]:
-    """Local regex-based absurdity/nonsense filter before spending API tokens."""
-    cleaned = (text or "").strip().lower()
+# ==============================================================================
+# LOCAL PHASE 1 CLASSIFIER, ABSURDITY FILTER & DUPLICATE DETECTOR
+# ==============================================================================
+def check_absurdity(text: str) -> Tuple[bool, str]:
+    cleaned = (text or "").strip()
     if not cleaned:
         return False, ""
-    for pat in ABSURDITY_PATTERNS:
+    for pat in ABSURD_PATTERNS:
         if re.search(pat, cleaned, flags=re.IGNORECASE):
-            return True, f"Matched non-technical / absurd pattern: `{pat}`"
+            return True, f"Matched non-technical / absurd pattern: {pat}"
     return False, ""
 
 
 @st.cache_resource
-def build_local_classifier() -> Tuple[TfidfVectorizer, LogisticRegression]:
-    """
-    Builds TF-IDF (unigram + bigram) + Logistic Regression model for Phase 1
-    structural completeness classification ("Valid" vs "Missing_Details").
-    """
-    training_samples: List[Tuple[str, str]] = [
-        # Structurally complete / valid defect reports
+def train_local_classifier() -> Tuple[TfidfVectorizer, LogisticRegression]:
+    samples: List[Tuple[str, str]] = [
         (
-            "Steps to reproduce: 1. Navigate to /login. 2. Enter valid email and wrong password. "
-            "3. Click Sign In. Expected result: Error message 'Invalid credentials' appears. "
-            "Actual result: App returns HTTP 500 Internal Server Error on API /auth/login.",
+            "Steps to reproduce: 1. Go to /login. 2. Enter valid email and wrong password. "
+            "3. Click Login. Expected result: Show invalid credentials message. "
+            "Actual result: Returns HTTP 500 Internal Server Error.",
             "Valid",
         ),
         (
-            "On checkout page, selecting express shipping and applying promo code SAVE10 fails "
-            "to recalculate total. Expected: Discount subtracts 10% from subtotal. "
-            "Actual: Total stays unchanged and console logs TypeError in cart.js line 84.",
+            "On checkout page, applying discount code SAVE10 fails to update total. "
+            "Expected: Subtotal decreases by 10%. Actual: Cart total remains unchanged.",
             "Valid",
         ),
         (
-            "When exporting a CSV report with >5000 rows from the Analytics dashboard, "
-            "the request times out after 30 seconds. Expected: File downloads within 5 seconds. "
-            "Actual: Gateway timeout 504 occurs in backend export endpoint.",
+            "Exporting CSV with over 5000 rows from Reports page times out after 30s. "
+            "Expected: CSV file downloads cleanly. Actual: 504 Gateway Timeout occurs.",
             "Valid",
         ),
         (
-            "Repro steps: Open user profile settings, upload a 2MB PNG avatar, click Save. "
-            "Expected: Avatar updates and persists on reload. Actual: Profile image reverts "
-            "to default placeholder and MongoDB profile document is not updated.",
+            "In Profile settings, uploading a PNG avatar and refreshing reverts to default avatar. "
+            "Expected: Uploaded image persists. Actual: Avatar resets on page reload.",
             "Valid",
         ),
         (
-            "Filter by date range on Invoices table throws SQL syntax error when end date is empty. "
-            "Expected: Return all invoices from start date onward. Actual: 400 Bad Request "
-            "with malformed query parameter error.",
+            "Filtering orders by start date without end date throws SQL syntax error. "
+            "Expected: Display matching orders from start date. Actual: HTTP 400 error.",
             "Valid",
         ),
-        (
-            "Mobile view (375px width) overlaps the submit button over the terms checkbox on "
-            "registration form. Expected: Checkbox and button stack cleanly without overlap. "
-            "Actual: Button blocks tapping the checkbox in Chrome Android.",
-            "Valid",
-        ),
-        # Structurally incomplete / missing details
-        (
-            "Login broken",
-            "Missing_Details",
-        ),
-        (
-            "Bug on dashboard please fix",
-            "Missing_Details",
-        ),
-        (
-            "It does not work when I click it",
-            "Missing_Details",
-        ),
-        (
-            "Page crashing sometimes",
-            "Missing_Details",
-        ),
-        (
-            "Wrong value shown",
-            "Missing_Details",
-        ),
-        (
-            "API issue",
-            "Missing_Details",
-        ),
+        ("Login broken", "Missing_Details"),
+        ("Bug on dashboard", "Missing_Details"),
+        ("Button does not work", "Missing_Details"),
+        ("App crashes sometimes", "Missing_Details"),
+        ("Wrong output shown", "Missing_Details"),
     ]
 
-    texts = [t for t, _ in training_samples]
-    labels = [lbl for _, lbl in training_samples]
+    texts = [x[0] for x in samples]
+    labels = [x[1] for x in samples]
 
-    vectorizer = TfidfVectorizer(ngram_range=(1, 2), lowercase=True, stop_words="english")
-    x_vec = vectorizer.fit_transform(texts)
-
+    vec = TfidfVectorizer(ngram_range=(1, 2), stop_words="english")
+    x_train = vec.fit_transform(texts)
     clf = LogisticRegression(max_iter=1000, random_state=42)
-    clf.fit(x_vec, labels)
-    return vectorizer, clf
+    clf.fit(x_train, labels)
+    return vec, clf
 
 
-def run_phase1_validation(
-    bug_text: str,
-    vectorizer: TfidfVectorizer,
+def validate_structure_locally(
+    report_text: str,
+    vec: TfidfVectorizer,
     clf: LogisticRegression,
-    historical_reports: List[Dict[str, Any]],
+    history: List[Dict[str, Any]],
 ) -> Dict[str, Any]:
-    """
-    Executes Phase 1:
-    1. Absurdity check
-    2. Structural completeness check (TF-IDF + Logistic Regression + basic heuristics)
-    3. Historical duplicate detection via TF-IDF cosine similarity (>= 0.85)
-    """
-    start_ms = time.perf_counter()
-    clean_text = (bug_text or "").strip()
+    t0 = time.perf_counter()
+    clean = (report_text or "").strip()
 
-    absurd_flag, absurd_reason = is_absurd_report(clean_text)
-
-    if not clean_text:
+    absurd, absurd_reason = check_absurdity(clean)
+    if not clean:
         return {
             "status": "Missing_Details",
-            "is_valid_structure": False,
             "confidence": 0.0,
             "is_absurd": False,
             "absurd_reason": "",
-            "missing_hints": ["Defect description is empty."],
-            "duplicate_match": None,
-            "elapsed_ms": round((time.perf_counter() - start_ms) * 1000, 2),
+            "duplicate": None,
+            "elapsed_ms": round((time.perf_counter() - t0) * 1000, 2),
         }
 
-    x_input = vectorizer.transform([clean_text])
-    probs = clf.predict_proba(x_input)[0]
+    probs = clf.predict_proba(vec.transform([clean]))[0]
     classes = list(clf.classes_)
     valid_idx = classes.index("Valid") if "Valid" in classes else 1
     valid_prob = float(probs[valid_idx])
 
-    # Structural heuristics to reinforce short/vague entries
-    word_count = len(clean_text.split())
-    lower_t = clean_text.lower()
-    has_expected_or_actual = any(
-        k in lower_t for k in ["expected", "actual", "step", "repro", "error", "fails", "timeout"]
+    has_details = len(clean.split()) >= 10 and any(
+        w in clean.lower() for w in ["expected", "actual", "step", "error", "fail", "timeout"]
     )
+    is_valid = (valid_prob >= 0.55) and has_details and (not absurd)
+    status = "Valid" if is_valid else "Missing_Details"
 
-    missing_hints: List[str] = []
-    if word_count < 12:
-        missing_hints.append("Description is very brief (fewer than 12 words).")
-    if not has_expected_or_actual:
-        missing_hints.append(
-            "Include reproduction steps, expected behavior, and actual behavior/error details."
+    duplicate_info = None
+    past_texts = [item.get("raw_report", "") for item in history if item.get("raw_report")]
+    if past_texts:
+        dup_vec = TfidfVectorizer(ngram_range=(1, 2), stop_words="english").fit_transform(
+            past_texts + [clean]
         )
-
-    is_structurally_valid = (valid_prob >= 0.55) and (word_count >= 10) and (not absurd_flag)
-    status_label = "Valid" if is_structurally_valid else "Missing_Details"
-
-    # Historical duplicate check using cosine similarity
-    duplicate_match: Optional[Dict[str, Any]] = None
-    corpus = [r.get("raw_report", "") for r in historical_reports if r.get("raw_report")]
-    if corpus:
-        all_docs = corpus + [clean_text]
-        dup_vec = TfidfVectorizer(ngram_range=(1, 2), stop_words="english").fit_transform(all_docs)
-        sim_scores = cosine_similarity(dup_vec[-1], dup_vec[:-1])[0]
-        best_idx = int(np.argmax(sim_scores))
-        best_score = float(sim_scores[best_idx])
-        if best_score >= DUPLICATE_THRESHOLD:
-            matched_doc = historical_reports[best_idx]
-            duplicate_match = {
-                "similarity": round(best_score * 100, 1),
-                "matched_title": matched_doc.get("ticket_title", "Historical Defect"),
-                "matched_component": matched_doc.get("component", "Unassigned"),
+        sims = cosine_similarity(dup_vec[-1], dup_vec[:-1])[0]
+        best_i = int(np.argmax(sims))
+        best_sim = float(sims[best_i])
+        if best_sim >= DUPLICATE_THRESHOLD:
+            matched = history[best_i]
+            duplicate_info = {
+                "similarity": round(best_sim * 100, 1),
+                "title": matched.get("ticket_title", "Previous Defect"),
+                "component": matched.get("component", "General"),
             }
 
     return {
-        "status": status_label,
-        "is_valid_structure": is_structurally_valid,
+        "status": status,
         "confidence": round(valid_prob * 100, 2),
-        "is_absurd": absurd_flag,
+        "is_absurd": absurd,
         "absurd_reason": absurd_reason,
-        "missing_hints": missing_hints,
-        "duplicate_match": duplicate_match,
-        "elapsed_ms": round((time.perf_counter() - start_ms) * 1000, 2),
+        "duplicate": duplicate_info,
+        "elapsed_ms": round((time.perf_counter() - t0) * 1000, 2),
     }
 
 
 # ==============================================================================
-# 3. DOCUMENT PARSER (.TXT, .PDF, .DOCX) & GEMINI CLIENT
+# DOCUMENT PARSING, GEMINI & GITHUB EXPORT
 # ==============================================================================
-def extract_uploaded_text(uploaded_file) -> Tuple[str, Optional[str]]:
-    """Extracts text from .txt, .pdf, or .docx files."""
+def parse_uploaded_file(uploaded_file) -> Tuple[str, Optional[str]]:
     if uploaded_file is None:
-        return "", "No file provided."
+        return "", "No file uploaded."
 
-    file_name = (uploaded_file.name or "").lower()
-    raw_bytes = uploaded_file.getvalue()
+    name = (uploaded_file.name or "").lower()
+    data = uploaded_file.getvalue()
 
     try:
-        if file_name.endswith(".txt"):
-            return raw_bytes.decode("utf-8", errors="replace"), None
-
-        if file_name.endswith(".pdf"):
+        if name.endswith(".txt"):
+            return data.decode("utf-8", errors="replace"), None
+        if name.endswith(".pdf"):
             if PdfReader is None:
-                return "", "Install `pypdf` or `PyPDF2` to parse PDF documents."
-            reader = PdfReader(io.BytesIO(raw_bytes))
-            pages_text = [(page.extract_text() or "") for page in reader.pages]
-            return "\n".join(pages_text).strip(), None
-
-        if file_name.endswith(".docx"):
+                return "", "Install pypdf or PyPDF2 to read PDF files."
+            reader = PdfReader(io.BytesIO(data))
+            return "\n".join([(p.extract_text() or "") for p in reader.pages]).strip(), None
+        if name.endswith(".docx"):
             if docx is None:
-                return "", "Install `python-docx` to parse DOCX documents."
-            document = docx.Document(io.BytesIO(raw_bytes))
-            paragraphs = [p.text for p in document.paragraphs if p.text.strip()]
-            return "\n".join(paragraphs).strip(), None
-
-        return "", "Unsupported file type. Please upload a .txt, .pdf, or .docx file."
+                return "", "Install python-docx to read DOCX files."
+            doc = docx.Document(io.BytesIO(data))
+            return "\n".join([p.text for p in doc.paragraphs if p.text.strip()]).strip(), None
+        return "", "Supported formats: .txt, .pdf, .docx"
     except Exception as exc:
-        return "", f"Failed to parse uploaded file: {exc}"
+        return "", f"Error reading file: {exc}"
 
 
-def get_gemini_client() -> Tuple[Optional[Any], Optional[str]]:
-    """Initializes Google GenAI client if SDK and API key are available."""
+def init_gemini() -> Tuple[Optional[Any], Optional[str]]:
     api_key = os.getenv("GEMINI_API_KEY") or st.secrets.get("GEMINI_API_KEY", "")  # type: ignore
     if not api_key:
-        return None, "GEMINI_API_KEY is not set."
+        return None, "GEMINI_API_KEY not configured."
     if genai is None:
-        return None, "`google-genai` package is not installed."
+        return None, "google-genai SDK not installed."
     try:
-        client = genai.Client(api_key=api_key)
-        return client, None
+        return genai.Client(api_key=api_key), None
     except Exception as exc:
-        return None, f"Could not initialize Gemini client: {exc}"
+        return None, f"Failed to initialize Gemini client: {exc}"
 
 
-def call_gemini_with_fallback(
+def refine_and_cross_reference_prd(
     client: Any,
-    prompt: str,
-    model_name: str = GEMINI_MODEL_NAME,
-) -> Tuple[Optional[str], Optional[str]]:
-    """
-    Calls Gemini model and returns (response_text, error_message).
-    Catches quota/token exhaustion, timeouts, or model errors gracefully.
-    """
-    if client is None:
-        return None, "Gemini client unavailable."
-    try:
-        resp = client.models.generate_content(
-            model=model_name,
-            contents=prompt,
-        )
-        text = (getattr(resp, "text", "") or "").strip()
-        if not text:
-            return None, "Empty response returned by Gemini."
-        return text, None
-    except Exception as exc:
-        return None, f"Gemini fallback triggered ({type(exc).__name__}): {exc}"
-
-
-# ==============================================================================
-# 4. COMBINED COHERENCY + REQUIREMENTS CHECK & TICKET RESTRUCTURING
-# ==============================================================================
-def evaluate_coherency_and_requirements(
-    client: Any,
-    bug_report_text: str,
-    prd_text: str,
-    guidelines_text: str = "",
-) -> Dict[str, Any]:
-    """
-    Evaluates BOTH:
-      1. Internal logical coherency ("coherent")
-      2. Alignment with uploaded PRD / instructions ("follows_requirements")
-    Returns exact status labels:
-      - "Passed Both"
-      - "Not Coherent"
-      - "Not Accurate to the Instructions"
-      - "Not Coherent & Not Accurate to the Instructions"
-    With local heuristic fallback if Gemini is unavailable or hits token limits.
-    """
-    start_ms = time.perf_counter()
-    prd_clean = (prd_text or "").strip()
-    bug_clean = (bug_report_text or "").strip()
-    guide_clean = (guidelines_text or "").strip()
-
-    if not prd_clean:
-        return {
-            "coherent": None,
-            "follows_requirements": False,
-            "status_label": "Missing PRD / Requirements Document",
-            "coherency_reason": "Cannot verify requirements compliance without an uploaded PRD.",
-            "requirements_reason": "Please upload a PRD file (.txt, .pdf, .docx) first.",
-            "fallback_used": False,
-            "elapsed_ms": round((time.perf_counter() - start_ms) * 1000, 2),
-        }
-
-    requirements_context = prd_clean[:10000]
-    if guide_clean:
-        requirements_context += f"\n\nADDITIONAL QA GUIDELINES:\n{guide_clean[:4000]}"
-
-    prompt = f"""
-You are a strict QA & Requirements Verification engine.
-Analyze the BUG REPORT against TWO independent checks:
-
-1. COHERENCY ("coherent"):
-   - Are the steps, actual behavior, and expected behavior logically consistent?
-   - Does it avoid self-contradictions or impossible/nonsensical claims?
-
-2. REQUIREMENTS / INSTRUCTIONS ACCURACY ("follows_requirements"):
-   - Does the bug report align with the business rules, expected behaviors, and scope in the UPLOADED PRD / QA INSTRUCTIONS?
-   - Mark "follows_requirements": false if the report claims something contradicts the PRD or violates stated instructions/rules.
-
-Respond ONLY with raw JSON (no markdown fences) matching this exact schema:
-{{
-  "coherent": true or false,
-  "follows_requirements": true or false,
-  "coherency_reason": "brief explanation",
-  "requirements_reason": "brief explanation"
-}}
-
-UPLOADED PRD & INSTRUCTIONS:
-\"\"\"{requirements_context}\"\"\"
-
-BUG REPORT:
-\"\"\"{bug_clean}\"\"\"
-"""
-
-    raw_text, err = call_gemini_with_fallback(client, prompt, GEMINI_MODEL_NAME)
-
-    if raw_text and not err:
-        try:
-            cleaned_json = re.sub(r"^```(?:json)?\s*|\s*```$", "", raw_text, flags=re.DOTALL).strip()
-            parsed = json.loads(cleaned_json)
-            coherent = bool(parsed.get("coherent", False))
-            follows_req = bool(parsed.get("follows_requirements", False))
-            coh_reason = str(parsed.get("coherency_reason", "")).strip()
-            req_reason = str(parsed.get("requirements_reason", "")).strip()
-
-            if coherent and follows_req:
-                status_label = "Passed Both"
-            elif (not coherent) and follows_req:
-                status_label = "Not Coherent"
-            elif coherent and (not follows_req):
-                status_label = "Not Accurate to the Instructions"
-            else:
-                status_label = "Not Coherent & Not Accurate to the Instructions"
-
-            return {
-                "coherent": coherent,
-                "follows_requirements": follows_req,
-                "status_label": status_label,
-                "coherency_reason": coh_reason or "Evaluated by Gemini.",
-                "requirements_reason": req_reason or "Evaluated against uploaded PRD.",
-                "fallback_used": False,
-                "elapsed_ms": round((time.perf_counter() - start_ms) * 1000, 2),
-            }
-        except Exception:
-            err = "Malformed JSON returned by model; fell back to local rule check."
-
-    # Graceful local fallback when API is unavailable or token-exhausted
-    absurd_flag, absurd_reason = is_absurd_report(bug_clean)
-    coherent_local = not absurd_flag
-
-    # Basic keyword overlap check against PRD terms as deterministic fallback
-    prd_tokens = {w for w in re.findall(r"[a-z]{4,}", prd_clean.lower())}
-    bug_tokens = {w for w in re.findall(r"[a-z]{4,}", bug_clean.lower())}
-    overlap_ratio = (len(prd_tokens & bug_tokens) / max(1, len(bug_tokens))) if bug_tokens else 0.0
-    follows_req_local = overlap_ratio >= 0.12
-
-    if coherent_local and follows_req_local:
-        status_label = "Passed Both"
-    elif (not coherent_local) and follows_req_local:
-        status_label = "Not Coherent"
-    elif coherent_local and (not follows_req_local):
-        status_label = "Not Accurate to the Instructions"
-    else:
-        status_label = "Not Coherent & Not Accurate to the Instructions"
-
-    return {
-        "coherent": coherent_local,
-        "follows_requirements": follows_req_local,
-        "status_label": status_label,
-        "coherency_reason": (
-            absurd_reason if absurd_flag else "Local fallback: no internal contradiction detected."
-        ),
-        "requirements_reason": (
-            f"Local fallback ({err}): token alignment ratio = {overlap_ratio:.0%} against PRD."
-        ),
-        "fallback_used": True,
-        "elapsed_ms": round((time.perf_counter() - start_ms) * 1000, 2),
-    }
-
-
-def generate_structured_ticket(
-    client: Any,
-    bug_report_text: str,
+    raw_report: str,
     prd_text: str,
     guidelines_text: str,
-    check_result: Dict[str, Any],
 ) -> Tuple[Dict[str, Any], float, bool]:
-    """Produces a standardized developer ticket with graceful local fallback."""
-    start_ms = time.perf_counter()
+    t0 = time.perf_counter()
 
     prompt = f"""
-Convert the raw bug report into a structured Agile developer ticket using the PRD and QA guidelines.
-Return ONLY valid JSON with keys:
-- "ticket_title": string
-- "severity": one of ["Critical", "High", "Medium", "Low"]
-- "component": string (e.g., "Authentication", "Checkout / Billing", "UI / Frontend", "API / Backend", "Reporting")
-- "probable_root_cause": string
-- "prd_alignment_notes": string
-- "formatted_markdown": markdown string with Summary, Steps to Reproduce, Expected vs Actual Behavior, and PRD Notes
+You are a QA triage assistant. Review the bug report against the uploaded PRD and QA guidelines.
+Return ONLY valid JSON with these keys:
+- "ticket_title": concise bug title
+- "severity": "Critical" | "High" | "Medium" | "Low"
+- "component": target software component
+- "coherency_status": "Coherent" | "Contradictory / Incoherent"
+- "prd_alignment": explanation of how the report matches or conflicts with the PRD
+- "structured_report": markdown formatted defect report
 
 PRD:
-\"\"\"{prd_text[:8000]}\"\"\"
+\"\"\"{prd_text[:9000]}\"\"\"
 
-QA GUIDELINES:
+GUIDELINES:
 \"\"\"{guidelines_text[:3000]}\"\"\"
 
-COMBINED CHECK STATUS:
-{check_result.get("status_label", "Unchecked")} | {check_result.get("coherency_reason", "")} | {check_result.get("requirements_reason", "")}
-
 RAW BUG REPORT:
-\"\"\"{bug_report_text}\"\"\"
+\"\"\"{raw_report}\"\"\"
 """
 
-    raw_text, err = call_gemini_with_fallback(client, prompt, GEMINI_MODEL_NAME)
-    elapsed_ms = round((time.perf_counter() - start_ms) * 1000, 2)
-
-    if raw_text and not err:
+    if client is not None:
         try:
-            cleaned = re.sub(r"^```(?:json)?\s*|\s*```$", "", raw_text, flags=re.DOTALL).strip()
-            data = json.loads(cleaned)
-            return data, elapsed_ms, False
+            resp = client.models.generate_content(model=MODEL_NAME, contents=prompt)
+            raw_out = (getattr(resp, "text", "") or "").strip()
+            cleaned = re.sub(r"^```(?:json)?\s*|\s*```$", "", raw_out, flags=re.DOTALL).strip()
+            parsed = json.loads(cleaned)
+            elapsed = round((time.perf_counter() - t0) * 1000, 2)
+            return parsed, elapsed, False
         except Exception:
             pass
 
-    # Fallback ticket structure
-    first_line = (bug_report_text or "Defect Report").strip().splitlines()[0][:80]
-    fallback_ticket = {
-        "ticket_title": f"[Triage] {first_line}",
+    elapsed = round((time.perf_counter() - t0) * 1000, 2)
+    summary_line = (raw_report or "Defect").strip().splitlines()[0][:80]
+    fallback = {
+        "ticket_title": f"[Bug] {summary_line}",
         "severity": "Medium",
-        "component": "General / Unassigned",
-        "probable_root_cause": "Generated via local fallback; manual root-cause verification recommended.",
-        "prd_alignment_notes": check_result.get("requirements_reason", "Pending PRD review."),
-        "formatted_markdown": (
-            f"### {first_line}\n"
+        "component": "General",
+        "coherency_status": "Local Fallback",
+        "prd_alignment": "Gemini unavailable or quota reached; fell back to local processing.",
+        "structured_report": (
+            f"### {summary_line}\n"
             f"- **Severity:** Medium\n"
-            f"- **Component:** General / Unassigned\n"
-            f"- **Verification Status:** {check_result.get('status_label', 'N/A')}\n"
-            f"- **Raw Report:** {bug_report_text}\n"
+            f"- **Component:** General\n"
+            f"- **Details:** {raw_report}"
         ),
     }
-    return fallback_ticket, elapsed_ms, True
+    return fallback, elapsed, True
+
+
+def export_to_github_issue(
+    token: str,
+    repo_full_name: str,
+    title: str,
+    body: str,
+) -> Tuple[bool, str]:
+    if not token or not repo_full_name:
+        return False, "Provide both a GitHub token and `owner/repo`."
+    url = f"https://api.github.com/repos/{repo_full_name.strip()}/issues"
+    headers = {
+        "Authorization": f"Bearer {token.strip()}",
+        "Accept": "application/vnd.github+json",
+    }
+    try:
+        r = requests.post(url, headers=headers, json={"title": title, "body": body}, timeout=15)
+        if r.status_code in (200, 201):
+            issue_url = r.json().get("html_url", "")
+            return True, f"Created GitHub issue: {issue_url}"
+        return False, f"GitHub API error ({r.status_code}): {r.text[:200]}"
+    except Exception as exc:
+        return False, f"GitHub request failed: {exc}"
 
 
 # ==============================================================================
-# 5. MONGODB PERSISTENCE & ANALYTICS HELPERS
+# MONGODB LOGGING
 # ==============================================================================
 @st.cache_resource
 def get_mongo_collection():
-    """Connects to MongoDB collection if MONGO_URI is configured."""
-    mongo_uri = os.getenv("MONGO_URI") or st.secrets.get("MONGO_URI", "")  # type: ignore
+    uri = os.getenv("MONGO_URI") or st.secrets.get("MONGO_URI", "")  # type: ignore
     db_name = os.getenv("MONGO_DB", "bugtriage_nlp")
     col_name = os.getenv("MONGO_COLLECTION", "triage_logs")
-    if not mongo_uri or MongoClient is None:
+    if not uri or MongoClient is None:
         return None
     try:
-        client = MongoClient(mongo_uri, serverSelectionTimeoutMS=3000)
+        client = MongoClient(uri, serverSelectionTimeoutMS=3000)
         client.admin.command("ping")
         return client[db_name][col_name]
     except Exception:
         return None
 
 
-def save_triage_record(record: Dict[str, Any]) -> None:
-    """Saves a triage record to MongoDB and session history."""
-    record_copy = dict(record)
-    record_copy["timestamp"] = datetime.now(timezone.utc).isoformat()
-    st.session_state["triage_history"].append(record_copy)
-
+def log_record(entry: Dict[str, Any]) -> None:
+    doc = dict(entry)
+    doc["timestamp"] = datetime.now(timezone.utc).isoformat()
+    st.session_state["records"].append(doc)
     col = get_mongo_collection()
     if col is not None:
         try:
-            col.insert_one(dict(record_copy))
+            col.insert_one(dict(doc))
         except Exception:
             pass
 
 
-def load_triage_records() -> List[Dict[str, Any]]:
-    """Loads triage records from MongoDB if available, merged with session history."""
+def fetch_records() -> List[Dict[str, Any]]:
     col = get_mongo_collection()
-    records: List[Dict[str, Any]] = []
     if col is not None:
         try:
-            cursor = col.find({}, {"_id": 0}).sort("timestamp", -1).limit(200)
-            records = list(cursor)
+            rows = list(col.find({}, {"_id": 0}).sort("timestamp", -1).limit(200))
+            if rows:
+                return rows
         except Exception:
-            records = []
-    if not records:
-        records = list(reversed(st.session_state.get("triage_history", [])))
-    return records
+            pass
+    return list(reversed(st.session_state.get("records", [])))
 
 
 # ==============================================================================
-# 6. SESSION STATE INITIALIZATION
+# SESSION STATE
 # ==============================================================================
-if "prd_text" not in st.session_state:
-    st.session_state["prd_text"] = ""
-if "prd_filename" not in st.session_state:
-    st.session_state["prd_filename"] = ""
-if "guidelines_text" not in st.session_state:
-    st.session_state["guidelines_text"] = ""
-if "phase1_result" not in st.session_state:
-    st.session_state["phase1_result"] = None
-if "combined_check_result" not in st.session_state:
-    st.session_state["combined_check_result"] = None
-if "generated_ticket" not in st.session_state:
-    st.session_state["generated_ticket"] = None
-if "triage_history" not in st.session_state:
-    st.session_state["triage_history"] = []
+for key, default in {
+    "prd_text": "",
+    "prd_name": "",
+    "guidelines_text": "",
+    "phase1_out": None,
+    "phase2_out": None,
+    "records": [],
+}.items():
+    if key not in st.session_state:
+        st.session_state[key] = default
 
 
 # ==============================================================================
-# 7. MAIN UI & WORKFLOW
+# UI
 # ==============================================================================
 st.title("🐞 BugTriage-NLP")
-st.caption(
-    f"Hybrid Defect Report Validation & Triage • Phase 1 (TF-IDF + Logistic Regression) "
-    f"• Phase 2 ({GEMINI_MODEL_NAME}) • PRD & Coherency Verification"
-)
+st.caption(f"Hybrid Defect Validation & Triage • Local ML + {MODEL_NAME} + MongoDB + GitHub")
 
-vectorizer, clf = build_local_classifier()
-gemini_client, gemini_init_err = get_gemini_client()
-existing_records = load_triage_records()
+vec, clf = train_local_classifier()
+gemini_client, gemini_err = init_gemini()
+records = fetch_records()
 
-tab_triage, tab_dashboard = st.tabs(["🧪 Defect Triage Workspace", "📊 QA Manager Dashboard"])
+tab1, tab2 = st.tabs(["Triage Workspace", "QA Dashboard"])
 
-with tab_triage:
-    col_left, col_right = st.columns([1.05, 1.25], gap="large")
+with tab1:
+    left, right = st.columns([1, 1.2], gap="large")
 
-    with col_left:
-        st.subheader("1. PRD & QA Formatting Requirements (Required)")
-        prd_file = st.file_uploader(
-            "Upload Product Requirements Document (.txt, .pdf, .docx)",
+    with left:
+        st.subheader("PRD Upload (Gatekeeper)")
+        prd_upload = st.file_uploader(
+            "Upload PRD (.txt, .pdf, .docx)",
             type=["txt", "pdf", "docx"],
-            key="prd_uploader",
+            key="prd_file",
         )
-        if prd_file is not None:
-            parsed_prd, parse_err = extract_uploaded_text(prd_file)
-            if parse_err:
-                st.error(parse_err)
+        if prd_upload is not None:
+            text_val, err_val = parse_uploaded_file(prd_upload)
+            if err_val:
+                st.error(err_val)
             else:
-                st.session_state["prd_text"] = parsed_prd
-                st.session_state["prd_filename"] = prd_file.name
-                st.success(f"Loaded PRD: **{prd_file.name}** ({len(parsed_prd)} chars)")
+                st.session_state["prd_text"] = text_val
+                st.session_state["prd_name"] = prd_upload.name
+                st.success(f"PRD loaded: {prd_upload.name}")
 
-        guide_file = st.file_uploader(
-            "Optional Custom QA Formatting Guidelines (.txt, .pdf, .docx)",
+        guide_upload = st.file_uploader(
+            "Optional QA Guidelines (.txt, .pdf, .docx)",
             type=["txt", "pdf", "docx"],
-            key="guidelines_uploader",
+            key="guide_file",
         )
-        if guide_file is not None:
-            parsed_guide, g_err = extract_uploaded_text(guide_file)
-            if g_err:
-                st.warning(g_err)
-            else:
-                st.session_state["guidelines_text"] = parsed_guide
-                st.info(f"Loaded Guidelines: **{guide_file.name}**")
+        if guide_upload is not None:
+            g_text, g_err = parse_uploaded_file(guide_upload)
+            if not g_err:
+                st.session_state["guidelines_text"] = g_text
 
-        with st.expander("Preview Loaded PRD Text", expanded=False):
-            st.text_area(
-                "PRD Content",
-                value=st.session_state["prd_text"],
-                height=160,
-                disabled=True,
-                label_visibility="collapsed",
-            )
-
-        st.divider()
-        st.subheader("2. Raw Defect Report Input")
-        bug_input = st.text_area(
-            "Enter or paste the raw defect report",
-            height=190,
-            placeholder=(
-                "Example: Steps to reproduce: 1. Open Checkout. 2. Apply expired coupon. "
-                "Expected: Reject coupon with error message. Actual: Discount applied anyway."
-            ),
-            key="bug_report_input",
+        st.subheader("Defect Report Input")
+        raw_bug = st.text_area(
+            "Raw defect report",
+            height=180,
+            placeholder="Describe reproduction steps, expected result, and actual result...",
         )
 
-        btn_p1, btn_combined = st.columns(2)
+        col_b1, col_b2 = st.columns(2)
+        with col_b1:
+            if st.button("Validate Structure (Phase 1)", use_container_width=True):
+                st.session_state["phase1_out"] = validate_structure_locally(
+                    raw_bug, vec, clf, records
+                )
 
-        with btn_p1:
-            run_p1_clicked = st.button(
-                "Run Phase 1 Check",
-                key="btn_phase1",
-                use_container_width=True,
-            )
-
-        with btn_combined:
-            run_combined_clicked = st.button(
-                "Check Coherency & Requirements",
-                key="btn_check_coherency_and_req",
+        with col_b2:
+            prd_ready = bool(st.session_state["prd_text"].strip())
+            if st.button(
+                "Triage with PRD & AI (Phase 2)",
                 type="primary",
+                disabled=not prd_ready,
                 use_container_width=True,
-            )
-
-        if run_p1_clicked:
-            p1_res = run_phase1_validation(
-                bug_text=bug_input,
-                vectorizer=vectorizer,
-                clf=clf,
-                historical_reports=existing_records,
-            )
-            st.session_state["phase1_result"] = p1_res
-
-        if run_combined_clicked:
-            p1_res = run_phase1_validation(
-                bug_text=bug_input,
-                vectorizer=vectorizer,
-                clf=clf,
-                historical_reports=existing_records,
-            )
-            st.session_state["phase1_result"] = p1_res
-
-            comb_res = evaluate_coherency_and_requirements(
-                client=gemini_client,
-                bug_report_text=bug_input,
-                prd_text=st.session_state.get("prd_text", ""),
-                guidelines_text=st.session_state.get("guidelines_text", ""),
-            )
-            st.session_state["combined_check_result"] = comb_res
-
-            ticket_data, p2_ms, p2_fallback = generate_structured_ticket(
-                client=gemini_client,
-                bug_report_text=bug_input,
-                prd_text=st.session_state.get("prd_text", ""),
-                guidelines_text=st.session_state.get("guidelines_text", ""),
-                check_result=comb_res,
-            )
-            st.session_state["generated_ticket"] = ticket_data
-
-            save_triage_record(
-                {
-                    "raw_report": bug_input,
-                    "prd_filename": st.session_state.get("prd_filename", "None"),
-                    "phase1_status": p1_res["status"],
-                    "phase1_confidence": p1_res["confidence"],
-                    "phase1_ms": p1_res["elapsed_ms"],
-                    "combined_status": comb_res["status_label"],
-                    "coherent": comb_res["coherent"],
-                    "follows_requirements": comb_res["follows_requirements"],
-                    "combined_ms": comb_res["elapsed_ms"],
+            ):
+                p1 = validate_structure_locally(raw_bug, vec, clf, records)
+                st.session_state["phase1_out"] = p1
+                p2, p2_ms, used_fallback = refine_and_cross_reference_prd(
+                    gemini_client,
+                    raw_bug,
+                    st.session_state["prd_text"],
+                    st.session_state["guidelines_text"],
+                )
+                st.session_state["phase2_out"] = {
+                    **p2,
                     "phase2_ms": p2_ms,
-                    "fallback_used": comb_res["fallback_used"] or p2_fallback,
-                    "ticket_title": ticket_data.get("ticket_title", ""),
-                    "severity": ticket_data.get("severity", "Medium"),
-                    "component": ticket_data.get("component", "General"),
+                    "fallback": used_fallback,
                 }
-            )
+                log_record(
+                    {
+                        "raw_report": raw_bug,
+                        "prd_name": st.session_state["prd_name"],
+                        "phase1_status": p1["status"],
+                        "phase1_ms": p1["elapsed_ms"],
+                        "phase2_ms": p2_ms,
+                        "fallback": used_fallback,
+                        "ticket_title": p2.get("ticket_title", ""),
+                        "severity": p2.get("severity", "Medium"),
+                        "component": p2.get("component", "General"),
+                    }
+                )
+            if not prd_ready:
+                st.caption("Upload a PRD document first to unlock Phase 2 triage.")
 
-    with col_right:
-        st.subheader("3. Validation, Coherency & Requirements Results")
+    with right:
+        st.subheader("Validation & Triage Output")
+        if gemini_err:
+            st.caption(gemini_err)
 
-        if gemini_init_err:
-            st.caption(f"ℹ️ {gemini_init_err} — Local fallback mode active when needed.")
-
-        p1 = st.session_state.get("phase1_result")
-        if p1:
-            st.markdown("**Phase 1 — Local Structural & Gatekeeper Check**")
-            if p1["is_absurd"]:
-                st.error(f"🚫 **Absurd / Non-Technical Claim Detected:** {p1['absurd_reason']}")
-            elif p1["status"] == "Valid":
+        p1_res = st.session_state.get("phase1_out")
+        if p1_res:
+            if p1_res["is_absurd"]:
+                st.error(f"Absurd input detected: {p1_res['absurd_reason']}")
+            elif p1_res["status"] == "Valid":
                 st.success(
-                    f"✅ **Structure: Valid** (Confidence: {p1['confidence']}% • {p1['elapsed_ms']} ms)"
+                    f"Phase 1: Valid structure ({p1_res['confidence']}% • {p1_res['elapsed_ms']} ms)"
                 )
             else:
                 st.warning(
-                    f"⚠️ **Structure: Missing_Details** (Confidence: {p1['confidence']}% • {p1['elapsed_ms']} ms)"
+                    f"Phase 1: Missing Details ({p1_res['confidence']}% • {p1_res['elapsed_ms']} ms) — Revise & Resubmit."
                 )
-                for hint in p1.get("missing_hints", []):
-                    st.write(f"- {hint}")
 
-            if p1.get("duplicate_match"):
-                dup = p1["duplicate_match"]
+            if p1_res.get("duplicate"):
+                dup = p1_res["duplicate"]
                 st.warning(
-                    f"🔁 **Possible Historical Duplicate ({dup['similarity']}% similarity):** "
-                    f"*{dup['matched_title']}* [{dup['matched_component']}]"
+                    f"Potential duplicate ({dup['similarity']}% match): {dup['title']} ({dup['component']})"
                 )
 
-        comb = st.session_state.get("combined_check_result")
-        if comb:
-            st.markdown("**Phase 2 — Combined Coherency & Uploaded PRD Requirements Check**")
-            label = comb["status_label"]
-            detail_line = (
-                f"**Coherency:** {comb['coherency_reason']}  \n"
-                f"**PRD / Requirements:** {comb['requirements_reason']}  \n"
-                f"*Latency: {comb['elapsed_ms']} ms"
-                f"{' • Fallback Mode' if comb.get('fallback_used') else ''}*"
+        p2_res = st.session_state.get("phase2_out")
+        if p2_res:
+            st.markdown(f"**Title:** {p2_res.get('ticket_title', '')}")
+            st.markdown(
+                f"**Severity:** {p2_res.get('severity', 'Medium')} | "
+                f"**Component:** {p2_res.get('component', 'General')} | "
+                f"**Coherency:** {p2_res.get('coherency_status', 'N/A')}"
             )
+            st.markdown(f"**PRD Alignment:** {p2_res.get('prd_alignment', '')}")
+            st.markdown(p2_res.get("structured_report", ""))
 
-            if label == "Passed Both":
-                st.success(f"✅ **Passed Both**\n\n{detail_line}")
-            elif label == "Not Coherent":
-                st.error(f"❌ **Not Coherent**\n\n{detail_line}")
-            elif label == "Not Accurate to the Instructions":
-                st.warning(f"⚠️ **Not Accurate to the Instructions**\n\n{detail_line}")
-            elif label == "Not Coherent & Not Accurate to the Instructions":
-                st.error(f"❌⚠️ **Not Coherent & Not Accurate to the Instructions**\n\n{detail_line}")
-            else:
-                st.info(f"ℹ️ **{label}**\n\n{detail_line}")
+            with st.expander("Export to GitHub Issue"):
+                gh_repo = st.text_input("Repository (owner/repo)", key="gh_repo")
+                gh_token = st.text_input("GitHub Token", type="password", key="gh_token")
+                if st.button("Create GitHub Issue"):
+                    ok, msg = export_to_github_issue(
+                        gh_token,
+                        gh_repo,
+                        p2_res.get("ticket_title", "Bug Report"),
+                        p2_res.get("structured_report", raw_bug),
+                    )
+                    if ok:
+                        st.success(msg)
+                    else:
+                        st.error(msg)
 
-        ticket = st.session_state.get("generated_ticket")
-        if ticket:
-            st.divider()
-            st.subheader("4. Standardized Developer Ticket")
-            m1, m2, m3 = st.columns(3)
-            m1.metric("Severity", ticket.get("severity", "Medium"))
-            m2.metric("Component", ticket.get("component", "General"))
-            m3.metric("PRD Status", comb["status_label"] if comb else "Pending")
-
-            st.markdown(f"**Title:** {ticket.get('ticket_title', 'Untitled Ticket')}")
-            st.markdown(f"**Probable Root Cause:** {ticket.get('probable_root_cause', 'N/A')}")
-            st.markdown(f"**PRD Alignment Notes:** {ticket.get('prd_alignment_notes', 'N/A')}")
-
-            with st.expander("Formatted Ticket Markdown", expanded=True):
-                st.markdown(ticket.get("formatted_markdown", ""))
-
-
-with tab_dashboard:
-    st.subheader("QA Manager Dashboard Analytics")
-    records = load_triage_records()
-
-    if not records:
-        st.info("No triage records logged yet. Run a check in the Triage Workspace to populate metrics.")
+with tab2:
+    st.subheader("QA Analytics")
+    all_rows = fetch_records()
+    if not all_rows:
+        st.info("No triage logs available yet.")
     else:
-        df = pd.DataFrame(records)
-        total_runs = len(df)
-        passed_both_count = int((df.get("combined_status") == "Passed Both").sum()) if "combined_status" in df else 0
-        avg_p1_ms = round(float(df["phase1_ms"].mean()), 2) if "phase1_ms" in df else 0.0
-        avg_p2_ms = round(float(df["phase2_ms"].mean()), 2) if "phase2_ms" in df else 0.0
-
-        c1, c2, c3, c4 = st.columns(4)
-        c1.metric("Total Triaged Reports", total_runs)
-        c2.metric("Passed Both Rate", f"{(passed_both_count / total_runs) * 100:.1f}%")
-        c3.metric("Avg Phase 1 Speed", f"{avg_p1_ms} ms")
-        c4.metric("Avg Phase 2 Speed", f"{avg_p2_ms} ms")
-
+        df = pd.DataFrame(all_rows)
+        m1, m2, m3 = st.columns(3)
+        m1.metric("Total Logs", len(df))
+        m2.metric("Avg Phase 1 (ms)", round(float(df["phase1_ms"].mean()), 2) if "phase1_ms" in df else 0.0)
+        m3.metric("Avg Phase 2 (ms)", round(float(df["phase2_ms"].mean()), 2) if "phase2_ms" in df else 0.0)
         st.dataframe(df, use_container_width=True)
