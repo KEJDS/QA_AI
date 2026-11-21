@@ -160,6 +160,8 @@ def handle_oauth_login():
                 "confidence",
                 "coherence_status",
                 "coherence_reason",
+                "combined_verdict",
+                "combined_details",
                 "draft_report",
                 "phase1_ms",
                 "phase2_ms",
@@ -262,7 +264,7 @@ def create_session(
     bug_report,
     prediction,
     confidence,
-    coherence_status="COHERENT",
+    coherence_status="PENDING",
     coherence_reason="",
     p1_ms=0,
     p2_ms=0,
@@ -715,6 +717,82 @@ def verify_semantic_coherence(bug_report: str, use_gemini=False):
     )
 
 
+def run_combined_coherence_and_prd(bug_report: str, prd_text: str, use_gemini=False):
+    coherence_status, coherence_reason, coh_conf, coh_metrics = verify_semantic_coherence(
+        bug_report, use_gemini=use_gemini
+    )
+    coherence_passed = coherence_status == "COHERENT"
+
+    prd_status = "NOT FOLLOWED"
+    prd_explanation = ""
+
+    if not prd_text or not prd_text.strip():
+        prd_explanation = "No PRD document provided."
+    elif chat_model is None:
+        prd_explanation = "Gemini API is unavailable to verify PRD instructions."
+    else:
+        prompt = (
+            "You are a strict QA Lead. Compare the following Bug Report against the provided Product Requirements Document (PRD).\n\n"
+            "INSTRUCTIONS:\n"
+            "1. Check whether the bug report's 'Expected Behavior' and reported flow follow the rules/instructions in the PRD.\n"
+            "2. Respond with PRD_STATUS: FOLLOWED only if the expected behavior aligns with the PRD requirements, or PRD_STATUS: NOT_FOLLOWED if it contradicts, violates, or does not follow the PRD instructions.\n"
+            "3. Quote or reference the specific section/rule from the PRD and explain briefly.\n\n"
+            "Respond using this exact format:\n"
+            "PRD_STATUS: [FOLLOWED or NOT_FOLLOWED]\n"
+            "EXPLANATION: [Concise explanation quoting the PRD]\n\n"
+            f"--- PRD EXTRACT ---\n{prd_text[:12000]}\n\n"
+            f"--- BUG REPORT ---\n{bug_report}"
+        )
+        try:
+            resp = chat_model.generate_content(
+                prompt,
+                generation_config=genai.types.GenerationConfig(
+                    temperature=0.0, max_output_tokens=600
+                ),
+                request_options={"timeout": 20.0},
+            )
+            raw_text = resp.text or ""
+            upper_text = raw_text.upper()
+            if "PRD_STATUS:" in upper_text:
+                for line in raw_text.splitlines():
+                    if "PRD_STATUS:" in line.upper():
+                        val = line.split(":", 1)[-1].strip().upper()
+                        prd_status = "FOLLOWED" if "NOT_FOLLOWED" not in val and "FOLLOWED" in val else "NOT FOLLOWED"
+                    elif "EXPLANATION:" in line.upper():
+                        prd_explanation = line.split(":", 1)[-1].strip()
+            if not prd_explanation:
+                prd_explanation = raw_text.strip()
+        except Exception as e:
+            prd_status = "NOT FOLLOWED"
+            prd_explanation = f"PRD check failed due to AI error ({type(e).__name__})."
+
+    prd_passed = prd_status == "FOLLOWED"
+    both_passed = coherence_passed and prd_passed
+    final_label = (
+        "BOTH PASSED"
+        if both_passed
+        else "NOT COHERENT OR NOT FOLLOWED THE INSTRUCTIONS"
+    )
+
+    summary_message = (
+        f"### Combined Check Result: **{final_label}**\n\n"
+        f"- **Coherence Check:** `{coherence_status}` ({coh_conf}% confidence) — {coherence_reason}\n"
+        f"- **PRD Instruction Check:** `{prd_status}` — {prd_explanation}"
+    )
+
+    return {
+        "both_passed": both_passed,
+        "final_label": final_label,
+        "coherence_status": coherence_status,
+        "coherence_reason": coherence_reason,
+        "coherence_confidence": coh_conf,
+        "coherence_details": coh_metrics,
+        "prd_status": prd_status,
+        "prd_explanation": prd_explanation,
+        "summary_message": summary_message,
+    }
+
+
 def generate_ai_response(
     user_question, bug_report_context, prediction_status, guideline_text="", stream=True
 ):
@@ -765,7 +843,7 @@ def export_to_external_system(
         f"- **Phase 1 (Structural):** `{prediction}` ({confidence}% confidence)\n"
     )
     if coherence_status and coherence_status != "PENDING":
-        val_text += f"- **Phase 2 (Semantic):** `{coherence_status}`\n"
+        val_text += f"- **Phase 2 (Coherence & PRD):** `{coherence_status}`\n"
     signature = (
         f"\n\n---\n*Reported via BugTriage-NLP by **{user_info.get('name', 'Unknown')}** "
         f"({user_info.get('email', '')})*"
@@ -809,6 +887,8 @@ def start_new_chat(preserve_draft=""):
         "confidence",
         "coherence_status",
         "coherence_reason",
+        "combined_verdict",
+        "combined_details",
         "phase1_ms",
         "phase2_ms",
         "duplicates",
@@ -967,6 +1047,8 @@ with tab_workspace:
                         "prediction": final_prediction,
                         "confidence": valid_conf,
                         "coherence_status": "PENDING",
+                        "combined_verdict": "",
+                        "combined_details": None,
                         "phase1_ms": int((t1 - t0) * 1000),
                         "duplicates": check_for_duplicates(
                             clean_input, st.session_state.session_id
@@ -993,6 +1075,29 @@ with tab_workspace:
         with st.expander("View Active Defect Report Context", expanded=True):
             st.write(st.session_state.current_report)
 
+        if not st.session_state.get("prd_text"):
+            st.info(
+                "⚠️ Upload a reference document (PRD) to run combined Coherence + PRD verification."
+            )
+            uploaded_prd_loaded = st.file_uploader(
+                "Upload PRD for Combined Check",
+                type=["pdf", "docx", "txt"],
+                key="prd_uploader_active",
+                label_visibility="collapsed",
+            )
+            if uploaded_prd_loaded:
+                st.session_state.prd_text = extract_text_from_file(uploaded_prd_loaded)
+                if st.session_state.prd_text:
+                    st.rerun()
+        else:
+            p_col1, p_col2 = st.columns([3, 1])
+            with p_col1:
+                st.success("✅ Reference Document is actively loaded.")
+            with p_col2:
+                if st.button("Clear PRD", use_container_width=True):
+                    st.session_state.prd_text = ""
+                    st.rerun()
+
         if st.session_state.get("duplicates"):
             st.warning(
                 f"⚠️ **Potential Duplicates Found:** Similarity >85% with {len(st.session_state.duplicates)} past report(s)."
@@ -1000,7 +1105,7 @@ with tab_workspace:
             for dup in st.session_state.duplicates:
                 st.caption(f"- {dup['title']} ({dup['score']}%)")
 
-        col1, col2, col3 = st.columns([1.2, 1.2, 1])
+        col1, col2, col3 = st.columns([1.2, 1.3, 1])
         with col1:
             st.caption(f"Phase 1: Validation ({st.session_state.get('phase1_ms', 0)}ms)")
             if st.session_state.prediction == "Valid":
@@ -1047,7 +1152,7 @@ with tab_workspace:
 
         if st.session_state.prediction == "Missing_Details":
             with col2:
-                st.caption("Phase 2: Semantic Verification")
+                st.caption("Phase 2: Coherence & PRD Check")
                 st.warning("Skipped (Blocked by Phase 1)")
             st.warning(
                 "Revision Required: Score below threshold. Add clear Steps, Expected, and Actual results."
@@ -1059,41 +1164,56 @@ with tab_workspace:
             with col2:
                 p2_ms = st.session_state.get("phase2_ms", 0)
                 st.caption(
-                    f"Phase 2: Semantic Check {'(' + str(p2_ms) + 'ms)' if p2_ms else ''}"
+                    f"Phase 2: Coherence & PRD Check {'(' + str(p2_ms) + 'ms)' if p2_ms else ''}"
                 )
                 use_gemini_phase2 = st.checkbox(
-                    "Use Gemini for enhanced semantic review",
+                    "Use Gemini for enhanced coherence review",
                     value=False,
                     disabled=not gemini_available,
                     help="Local checks always run. Gemini is optional.",
                 )
                 if not gemini_available:
-                    st.caption("Gemini unavailable — local checker is ready.")
+                    st.caption("Gemini unavailable — local coherence checker is ready.")
 
+                has_prd_loaded = bool(st.session_state.get("prd_text", "").strip())
                 btn_label = (
-                    "Run Coherence Check"
-                    if st.session_state.get("coherence_status", "PENDING") == "PENDING"
-                    else "🔄 Re-run Coherence Check"
+                    "Run Coherence & PRD Check"
+                    if not st.session_state.get("combined_verdict")
+                    else "🔄 Re-run Coherence & PRD Check"
                 )
 
-                if st.button(btn_label, type="secondary", use_container_width=True):
-                    with st.spinner("Running coherence checks..."):
+                if st.button(
+                    btn_label,
+                    type="primary",
+                    use_container_width=True,
+                    disabled=not has_prd_loaded,
+                ):
+                    with st.spinner("Running coherence and PRD verification..."):
                         t0 = time.time()
-                        verdict, reason, p2_confidence, p2_metrics = (
-                            verify_semantic_coherence(
-                                st.session_state.current_report,
-                                use_gemini=use_gemini_phase2,
-                            )
+                        result = run_combined_coherence_and_prd(
+                            st.session_state.current_report,
+                            st.session_state.prd_text,
+                            use_gemini=use_gemini_phase2,
                         )
                         t1 = time.time()
                         st.session_state.update(
                             {
-                                "coherence_status": verdict,
-                                "coherence_reason": reason,
-                                "coherence_confidence": p2_confidence,
-                                "coherence_details": p2_metrics,
+                                "combined_verdict": result["final_label"],
+                                "combined_details": result,
+                                "coherence_status": result["coherence_status"],
+                                "coherence_reason": result["coherence_reason"],
+                                "coherence_confidence": result["coherence_confidence"],
+                                "coherence_details": result["coherence_details"],
                                 "phase2_ms": int((t1 - t0) * 1000),
                             }
+                        )
+                        st.session_state.messages.append(
+                            {"role": "assistant", "content": result["summary_message"]}
+                        )
+                        save_message(
+                            st.session_state.session_id,
+                            "assistant",
+                            result["summary_message"],
                         )
                         create_session(
                             st.session_state.session_id,
@@ -1103,35 +1223,25 @@ with tab_workspace:
                             st.session_state.current_report,
                             st.session_state.prediction,
                             st.session_state.confidence,
-                            verdict,
-                            reason,
+                            result["final_label"],
+                            result["summary_message"],
                             st.session_state.phase1_ms,
                             st.session_state.phase2_ms,
                         )
                         st.rerun()
 
-                coh_status = st.session_state.get("coherence_status", "PENDING")
-                if coh_status == "CONTRADICTORY":
-                    st.error(f"Flagged: {st.session_state.coherence_reason}")
-                    st.metric(
-                        "Coherence confidence",
-                        f"{st.session_state.get('coherence_confidence', 0)}%",
-                    )
-                elif coh_status == "UNVERIFIED":
-                    st.warning(
-                        f"Manual review required: {st.session_state.coherence_reason}"
-                    )
-                    st.metric(
-                        "Coherence confidence",
-                        f"{st.session_state.get('coherence_confidence', 0)}%",
-                    )
-                elif coh_status == "PENDING":
-                    st.info("Awaiting Coherence Verification")
+                verdict_label = st.session_state.get("combined_verdict", "")
+                details_obj = st.session_state.get("combined_details") or {}
+                if verdict_label == "BOTH PASSED":
+                    st.success("BOTH PASSED")
+                elif verdict_label == "NOT COHERENT OR NOT FOLLOWED THE INSTRUCTIONS":
+                    st.error("NOT COHERENT OR NOT FOLLOWED THE INSTRUCTIONS")
                 else:
-                    st.success(st.session_state.coherence_reason)
-                    st.metric(
-                        "Coherence confidence",
-                        f"{st.session_state.get('coherence_confidence', 0)}%",
+                    st.info("Awaiting Coherence & PRD Check")
+
+                if details_obj:
+                    st.caption(
+                        f"Coherence: {details_obj.get('coherence_status')} | PRD: {details_obj.get('prd_status')}"
                     )
 
                 if st.session_state.get("coherence_details"):
@@ -1177,7 +1287,8 @@ with tab_workspace:
                                 custom_desc,
                                 st.session_state.prediction,
                                 st.session_state.confidence,
-                                st.session_state.coherence_status,
+                                st.session_state.get("combined_verdict")
+                                or st.session_state.coherence_status,
                                 target_repo,
                                 st.session_state.user["access_token"],
                                 st.session_state.user,
@@ -1189,109 +1300,35 @@ with tab_workspace:
                 else:
                     st.info("🔒 Sign in to export.")
 
-        st.markdown("### 🤖 Triage Assistant & PRD Verification")
-        col_ai1, col_ai2 = st.columns(2)
+        st.markdown("### 🤖 Triage Assistant")
+        if st.button("Standardize & Route via AI", use_container_width=True):
+            msg = "Standardize this bug report. Identify Severity, Component Routing, and Root Cause."
+            st.session_state.messages.append({"role": "user", "content": msg})
+            save_message(st.session_state.session_id, "user", msg)
 
-        with col_ai1:
-            st.markdown("#### Standard Route")
-            if st.button("Standardize & Route via AI", use_container_width=True):
-                msg = "Standardize this bug report. Identify Severity, Component Routing, and Root Cause."
-                st.session_state.messages.append({"role": "user", "content": msg})
-                save_message(st.session_state.session_id, "user", msg)
-
-                resp = generate_ai_response(
-                    msg,
-                    st.session_state.current_report,
-                    st.session_state.prediction,
-                    stream=True,
-                )
-                if isinstance(resp, str):
-                    st.session_state.messages.append(
-                        {"role": "assistant", "content": resp}
-                    )
-                    save_message(st.session_state.session_id, "assistant", resp)
-                else:
-                    def stream_gen():
-                        full = ""
-                        for chunk in resp:
-                            if chunk.text:
-                                full += chunk.text
-                                yield chunk.text
-                        save_message(st.session_state.session_id, "assistant", full)
-                        st.session_state.messages.append(
-                            {"role": "assistant", "content": full}
-                        )
-
-                    st.write_stream(stream_gen)
-                st.rerun()
-
-        with col_ai2:
-            st.markdown("#### Requirement Cross-Check")
-            if not st.session_state.get("prd_text"):
-                st.info(
-                    "⚠️ Upload a reference document (PRD) to verify against business rules."
-                )
-                uploaded_prd_loaded = st.file_uploader(
-                    "Upload PRD for Cross-Check",
-                    type=["pdf", "docx", "txt"],
-                    key="prd_uploader_active",
-                    label_visibility="collapsed",
-                )
-                if uploaded_prd_loaded:
-                    st.session_state.prd_text = extract_text_from_file(uploaded_prd_loaded)
-                    if st.session_state.prd_text:
-                        st.rerun()
+            resp = generate_ai_response(
+                msg,
+                st.session_state.current_report,
+                st.session_state.prediction,
+                stream=True,
+            )
+            if isinstance(resp, str):
+                st.session_state.messages.append({"role": "assistant", "content": resp})
+                save_message(st.session_state.session_id, "assistant", resp)
             else:
-                st.success("✅ Reference Document is actively loaded.")
-                if gemini_available:
-                    if st.button(
-                        "Verify against Reference",
-                        use_container_width=True,
-                        type="primary",
-                    ):
-                        msg = "Verify this bug report's 'Expected Behavior' against the uploaded Product Requirements Document (PRD)."
-                        st.session_state.messages.append({"role": "user", "content": msg})
-                        save_message(st.session_state.session_id, "user", msg)
-
-                        prompt = (
-                            "You are a strict QA Lead. Compare the following Bug Report against the provided Product Requirements Document (PRD).\n\n"
-                            "INSTRUCTIONS:\n"
-                            "1. Verify if the 'Expected Behavior' in the bug report aligns with the PRD.\n"
-                            "2. State whether the bug is valid (a real deviation from requirements) or invalid (works as designed according to the PRD).\n"
-                            "3. Quote the specific section of the PRD that proves your point.\n\n"
-                            f"--- PRD EXTRACT ---\n{st.session_state.prd_text[:12000]}\n\n"
-                            f"--- BUG REPORT ---\n{st.session_state.current_report}"
-                        )
-
-                        try:
-                            with st.spinner("Cross-referencing business rules..."):
-                                resp = chat_model.generate_content(prompt)
-                                st.session_state.messages.append(
-                                    {"role": "assistant", "content": resp.text}
-                                )
-                                save_message(
-                                    st.session_state.session_id, "assistant", resp.text
-                                )
-                        except Exception as e:
-                            fallback_msg = (
-                                f"⚠️ **PRD Verification Failed (AI Offline)**\n\n"
-                                f"Unable to reach Gemini API. Error details: `{type(e).__name__}`"
-                            )
-                            st.session_state.messages.append(
-                                {"role": "assistant", "content": fallback_msg}
-                            )
-                            save_message(
-                                st.session_state.session_id, "assistant", fallback_msg
-                            )
-                        st.rerun()
-                else:
-                    st.warning(
-                        "Gemini API is unavailable. Cannot run PRD verification."
+                def stream_gen():
+                    full = ""
+                    for chunk in resp:
+                        if chunk.text:
+                            full += chunk.text
+                            yield chunk.text
+                    save_message(st.session_state.session_id, "assistant", full)
+                    st.session_state.messages.append(
+                        {"role": "assistant", "content": full}
                     )
 
-                if st.button("Clear Reference Document", use_container_width=True):
-                    st.session_state.prd_text = ""
-                    st.rerun()
+                st.write_stream(stream_gen)
+            st.rerun()
 
         for m in st.session_state.messages:
             with st.chat_message(m["role"]):
